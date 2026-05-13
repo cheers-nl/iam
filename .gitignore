@@ -1,0 +1,35 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# TypeScript / CDK
+cdk.out/
+.cdk.staging/
+*.tsbuildinfo
+
+# Build artifacts
+dist/
+build/
+.next/
+
+# Environment & secrets (defense in depth — never commit AWS creds)
+.env
+.env.local
+.env.*.local
+.aws/
+*.pem
+*.key
+credentials.json
+aws-exports.js
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
