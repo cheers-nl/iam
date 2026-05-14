@@ -126,6 +126,46 @@ Copy this block for each new entry:
 - **Service(s)**: AWS CDK + IAM + CloudFormation
 - **Severity**: medium-high — invisible IAM is the worst IAM. Every CDK user passes through this step; no one is warned.
 
+### 2026-05-14 — CDK's `grantReadWriteData()` overprovisions: 11 DynamoDB actions for an app that needs 3
+
+- **What I was trying to do**: Grant my Lambda the permissions it needs to read/write a DynamoDB table. Used CDK's convenience method `table.grantReadWriteData(lambdaFn)`.
+- **Friction**: The CDK helper attached an IAM policy with **12 DynamoDB actions**:
+  ```
+  BatchGetItem, BatchWriteItem, ConditionCheckItem, DeleteItem, DescribeTable,
+  GetItem, GetRecords, GetShardIterator, PutItem, Query, Scan, UpdateItem
+  ```
+  My Lambda actually uses **3**: `PutItem`, `Query`, `GetItem`. The other 9 are unnecessary, and several are concerning:
+  - **`Scan`** — a full-table read; expensive and a common cost-incident cause. Granting Scan to a Lambda that doesn't need it is a permission footgun.
+  - **`GetRecords` / `GetShardIterator`** — these are DynamoDB Streams actions; my table doesn't have Streams enabled.
+  - **`DescribeTable`** — administrative metadata; my app doesn't need it.
+  - **`BatchWriteItem`** — bulk operations; not used.
+  Convenience methods like `grantReadWriteData` work *against* least-privilege defaults. To do this right I'd have to either (a) compose individual `grantPutItem` + `grantQuery` + `grantGetItem` calls, or (b) write a custom IAM policy by hand. Both are more code than the one-liner I used, so most teams take the one-liner and accept the overprovisioning.
+- **What would have been easier**:
+  - A CDK convention where `grantReadWriteData` produces a tight default (only DataPlane actions: GetItem, PutItem, UpdateItem, DeleteItem, Query, BatchGet, BatchWrite), with admin/stream actions moved to separate grants.
+  - At minimum, surface what was granted in the synth output as a warning: *"Granting 12 DynamoDB actions to Lambda. To narrow, use individual grant methods."*
+  - A CDK Aspect / linter rule that flags "Lambda has wildcard or near-wildcard DynamoDB permissions".
+- **Category**: Permissions / Tooling
+- **Service(s)**: AWS CDK + IAM + DynamoDB
+- **Severity**: medium — convenience-vs-security tradeoff baked into the framework default. Compounds with the cdk-bootstrap AdministratorAccess pattern: at every layer of CDK abstraction, defaults favor "it works" over "minimum permissions."
+
+### 2026-05-14 — DynamoDB `LeadingKeys` condition key promises per-row IAM enforcement, but is structurally hard to wire up with Lambda backends
+
+- **What I was trying to do**: Enforce per-user data isolation in the IAM layer rather than the application layer. The canonical approach AWS docs describe is the DynamoDB `dynamodb:LeadingKeys` condition key — bind your IAM policy to "this principal can only access rows whose partition key starts with their identity."
+- **Friction**: The pattern is designed for an architecture where each user has their own AWS credentials — typically via Cognito Identity Pool issuing per-user temporary STS credentials with the user's `sub` as a principal tag. In that world, `dynamodb:LeadingKeys` is elegant and works. But for the architecture pattern most likely chosen by a newcomer following AWS's modern tutorials — browser → API Gateway with Cognito User Pool authorizer → Lambda → DynamoDB — there is no per-user IAM identity inside the Lambda. The Lambda has a single execution role used for all users. To make `LeadingKeys` work here you must:
+  1. In the Lambda, call `sts:AssumeRole` (or `sts:AssumeRoleWithWebIdentity`) with the user's `sub` as a session tag.
+  2. Use the resulting scoped credentials to call DynamoDB.
+  3. The Lambda's execution role needs `sts:AssumeRole` plus `sts:TagSession` on a *second* role.
+  4. That second role's policy uses `LeadingKeys = ${aws:PrincipalTag/sub}`.
+  5. The first role and the second role together implement what 3 lines of application code already do: read `claims.sub` from the JWT and scope queries with `PK = USER#${sub}`.
+  In practice, almost everyone defaults to application-level enforcement (this project does, in D4). It works and is verifiable (tested: User B sees no User A data). But the IAM policy doesn't enforce it; if a future bug ever forgets to scope, the policy won't catch it. AWS's most powerful per-row IAM mechanism is structurally inaccessible to AWS's most-documented serverless pattern.
+- **What would have been easier**:
+  - A CDK higher-level construct — `LambdaScopedDynamoDbHandler` — that wires up the STS-AssumeRole-with-session-tags pattern in one line.
+  - Or: an API Gateway Cognito Authorizer mode that propagates scoped STS credentials (not just JWT claims) into the Lambda invocation context.
+  - Or, at minimum: documentation that clearly says "If you're using API Gateway + Lambda, here's the architecture decision for IAM-level isolation; here's what it costs; here's what you give up by going app-level."
+- **Category**: Authorization / Docs
+- **Service(s)**: IAM + DynamoDB + Lambda + Cognito + STS
+- **Severity**: **high** — this is a structural gap between IAM's design intent (per-row IAM enforcement is a marquee feature) and the dominant serverless architecture pattern. The "IAM as connective tissue" promise weakens at exactly the integration point where most apps land. A senior PM at IAM should care about this.
+
 ### 2026-05-14 — Cognito User Pool Authorizer accepts ID token but rejects Access token — opposite of OAuth 2.0 convention, error message gives no hint
 
 - **What I was trying to do**: Test which JWT type (ID vs Access) the API Gateway Cognito User Pool Authorizer accepts. Both tokens come from the same `admin-initiate-auth` response for the same user.

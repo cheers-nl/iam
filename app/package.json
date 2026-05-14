@@ -1,0 +1,16 @@
+{
+  "name": "team-vault-lite-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lambda handlers for Team Vault Lite",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3",
+    "@aws-sdk/lib-dynamodb": "^3"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8",
+    "@types/node": "^22",
+    "esbuild": "^0.28.0",
+    "typescript": "^5"
+  }
+}
