@@ -126,6 +126,22 @@ Copy this block for each new entry:
 - **Service(s)**: AWS CDK + IAM + CloudFormation
 - **Severity**: medium-high — invisible IAM is the worst IAM. Every CDK user passes through this step; no one is warned.
 
+### 2026-05-14 — Cognito User Pool Authorizer accepts ID token but rejects Access token — opposite of OAuth 2.0 convention, error message gives no hint
+
+- **What I was trying to do**: Test which JWT type (ID vs Access) the API Gateway Cognito User Pool Authorizer accepts. Both tokens come from the same `admin-initiate-auth` response for the same user.
+- **Friction**: Standard OAuth 2.0 convention is that **Access tokens are used to access APIs** and **ID tokens are used to identify the user**. A developer with OAuth literacy approaching Cognito would naturally try the access token first. But the API Gateway Cognito User Pool Authorizer **defaults to accepting only ID tokens** and rejects access tokens with a generic `401 Unauthorized` — identical to the response for a completely invalid token. Tested results:
+  - `Authorization: <ID token>` → 200 + Lambda receives `claims.sub` and `claims.email`
+  - `Authorization: <Access token>` → 401 `{"message":"Unauthorized"}`
+  - `Authorization: not-a-real-jwt` → 401 `{"message":"Unauthorized"}`
+  The token payloads themselves make the intended use obvious — ID token has `token_use: "id"` and rich claims (email, etc.); Access token has `token_use: "access"` and OAuth scopes. But the authorizer hides the type-check behind a generic 401. A newcomer learns OAuth, sends the Access token, hits 401, and has no signal pointing to "wrong token type." Expected debugging time: hours.
+- **What would have been easier**:
+  - Error message that distinguishes token-type rejection from invalid-token rejection: *"401 Unauthorized: token's `token_use` claim is `access`, but this authorizer expects `id`. Send the ID token, or configure your authorizer's `identitySource` to accept access tokens."*
+  - Change the default to accept either token type (matches OAuth convention).
+  - At minimum, surface this prominently in Cognito Authorizer docs — currently it's a footnote.
+- **Category**: Authentication / Docs
+- **Service(s)**: API Gateway + Cognito User Pool
+- **Severity**: medium-high — extremely common gotcha that contradicts OAuth norms; identical error messages for two distinct failure modes make this expensive to diagnose.
+
 ### 2026-05-13 — `cdk deploy` IAM Statement Changes table asks for consent that newcomers cannot meaningfully give
 
 - **What I was trying to do**: Run my first `cdk deploy` for the hello-world Lambda + API Gateway stack. CDK paused at the IAM Statement Changes confirmation prompt and asked me to type `y` to confirm before continuing.
