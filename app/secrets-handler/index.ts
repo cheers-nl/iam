@@ -27,7 +27,14 @@ const skForSecret = (secretId: string) => `SECRET#${secretId}`;
 
 const json = (statusCode: number, body: unknown): APIGatewayProxyResult => ({
   statusCode,
-  headers: { 'Content-Type': 'application/json' },
+  headers: {
+    'Content-Type': 'application/json',
+    // CORS headers must be on the actual response, not just on the OPTIONS
+    // preflight. defaultCorsPreflightOptions in CDK handles preflight only.
+    // For Lambda proxy integration, the function is responsible for these.
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Authorization,Content-Type',
+  },
   body: JSON.stringify(body),
 });
 
@@ -218,6 +225,12 @@ async function getSecret(
   }
 
   const item = result.Item;
+  if (!item.ciphertext || !item.iv || !item.authTag || !item.encryptedDek) {
+    return json(410, {
+      error:
+        'This secret was created before envelope encryption was enabled (legacy plaintext row). Please recreate it.',
+    });
+  }
   const password = await decryptValue(
     {
       ciphertext: item.ciphertext,

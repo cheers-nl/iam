@@ -126,6 +126,47 @@ Copy this block for each new entry:
 - **Service(s)**: AWS CDK + IAM + CloudFormation
 - **Severity**: medium-high — invisible IAM is the worst IAM. Every CDK user passes through this step; no one is warned.
 
+### 2026-05-14 — CORS is half-abstracted in CDK: preflight via stack config, response headers via Lambda code — the seam is undocumented and the failure mode is silent
+
+- **What I was trying to do**: Wire up the React SPA on CloudFront to call the Cognito-protected API on a different origin. Configured `defaultCorsPreflightOptions` on the API Gateway construct, assumed CORS was now "done."
+- **Friction**: First load worked — sign-in flow worked, callback exchange returned tokens. But the SPA's first GET `/secrets` call failed with the browser's most-frustrating error: **`Failed to fetch`**. No detail. No stack trace. No hint about CORS. The user-facing experience was a blank state with a red "Failed to fetch" message and no way to diagnose. 
+  
+  Investigation revealed the gap: **CORS in API Gateway with Lambda proxy integration is a two-part configuration:**
+  1. **Preflight side (OPTIONS request)**: API Gateway handles this. CDK's `defaultCorsPreflightOptions` auto-generates OPTIONS methods with the right CORS response headers and (importantly) auto-attaches `AuthorizationType.NONE` so Cognito authorizer doesn't block preflight.
+  2. **Actual response side (GET/POST response)**: Lambda's response must include CORS headers (`Access-Control-Allow-Origin`, etc.) directly. `defaultCorsPreflightOptions` **does not** add these to non-OPTIONS responses, because Lambda proxy integration means API Gateway can't mutate the response.
+  
+  Newcomer experience: configure `defaultCorsPreflightOptions`, verify preflight with `curl -X OPTIONS` (works!), assume CORS is done. Open browser → "Failed to fetch." Spend 30+ minutes wondering if it's CORS, network, or authentication. Eventually discover the Lambda's response is missing CORS headers. Add `Access-Control-Allow-Origin` to the Lambda's `headers` return. Works.
+  
+  The CDK abstraction is genuinely incomplete here — it solves the harder half (OPTIONS-with-bypass-authorizer) but the easier half (response headers) is dropped silently on the developer. Compounding it, the browser's `Failed to fetch` error is one of the worst error messages in web platform history — it gives zero signal that the issue is CORS.
+- **What would have been easier**:
+  - A `defaultCorsResponseHeaders` config on `RestApi` that injects headers into all responses (either via Lambda response wrapping or response mapping templates) — completing the CORS abstraction.
+  - At minimum, a CDK warning in `defaultCorsPreflightOptions` JSDoc: *"This only handles preflight. Your Lambda function must include `Access-Control-Allow-Origin` in its response headers."*
+  - Browsers should improve `Failed to fetch` to surface the underlying cause (CORS, network, DNS, etc.) — but that's not AWS's problem.
+- **Category**: Permissions / Tooling / Docs
+- **Service(s)**: API Gateway + Lambda + AWS CDK
+- **Severity**: medium-high — extremely common newcomer experience; CDK abstracts the hard part but leaves a silent gap in the easy part.
+
+### 2026-05-14 — API Gateway CORS has three independent surfaces — and the third surface (gateway responses) only fails after the first 401
+
+- **What I was trying to do**: After fixing the Lambda response to include CORS headers (entry above), confirm the browser flow worked end-to-end.
+- **Friction**: The flow worked on first sign-in. Then I let the page sit. The Cognito ID token expired (1-hour default). I refreshed. The SPA immediately failed with the same useless **`Failed to fetch`** message — but this time the cause was different. With an expired token, API Gateway's Cognito authorizer rejected the request at the *gateway level* and returned a 401 directly, **without invoking the Lambda**. Those gateway-level rejection responses are governed by a *third* CORS configuration surface in API Gateway: the **Gateway Responses** (`apigateway.GatewayResponse` in CDK, configured via `api.addGatewayResponse()`). By default, gateway responses do not include any CORS headers, so the browser blocked the 401, and the SPA saw `Failed to fetch` again with no indication that the underlying issue was an expired token.
+  
+  The full pattern: API Gateway CORS for a Cognito-protected Lambda has **three independent surfaces** that each need configuration:
+  | Surface | Trigger | CDK config | Default state |
+  |---|---|---|---|
+  | OPTIONS preflight | Browser sends preflight | `defaultCorsPreflightOptions` | No CORS unless set |
+  | Lambda 200/4xx response | Lambda invoked successfully | Lambda response headers | No CORS unless set in Lambda code |
+  | Gateway 4xx/5xx response | Authorizer rejection, invalid input, etc. | `addGatewayResponse(DEFAULT_4XX)` etc. | No CORS unless set |
+  
+  Newcomer experience: fix surface 1 (CDK), assume done; hit failure, fix surface 2 (Lambda code), assume done; **let the token expire**, hit failure again with identical error message, spend another 20+ minutes finding the third surface. The three gaps are all silent — none of the failures says "your CORS is missing here."
+- **What would have been easier**:
+  - CDK should offer a single "enable CORS" config that wires all three surfaces (preflight, Lambda response wrapping, gateway responses).
+  - Or, at minimum, the docs for `defaultCorsPreflightOptions` should list the three surfaces explicitly: *"This handles only OPTIONS preflight. You must additionally: (a) set CORS headers in your Lambda response, and (b) call `addGatewayResponse` for DEFAULT_4XX and DEFAULT_5XX to cover authorizer rejections."*
+  - Browsers should improve the `Failed to fetch` error to surface the CORS-blocking response details (Chromium has the info in DevTools, but the JS `Error.message` carries nothing).
+- **Category**: Permissions / Tooling / Docs
+- **Service(s)**: API Gateway + Lambda + AWS CDK + Cognito
+- **Severity**: **high** — three-surface design that exposes itself one-at-a-time as you traverse failure paths. Each failure produces the same useless error. This is one of the strongest "AWS service integration friction" examples in the project.
+
 ### 2026-05-14 — KMS access requires alignment between key policy and identity policy, but the default delegation rule makes the requirement invisible
 
 - **What I was trying to do**: Understand how `vaultKey.grantEncryptDecrypt(secretsFn)` actually works after deploying. Inspected both the KMS key policy and the Lambda's identity policy in the live account.

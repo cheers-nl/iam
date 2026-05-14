@@ -7,12 +7,45 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 
 export class TeamVaultLiteStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // ---------- Cognito (unchanged from D3) ----------
+    // ---------- S3 + CloudFront for the web UI (new in D6) ----------
+    // Private S3 bucket — no public access, served only via CloudFront OAC.
+    const webBucket = new s3.Bucket(this, 'WebBucket', {
+      bucketName: `team-vault-lite-web-${this.account}-${this.region}`,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+
+    // CloudFront distribution with Origin Access Control (modern replacement
+    // for the deprecated Origin Access Identity).
+    const distribution = new cloudfront.Distribution(this, 'WebDistribution', {
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(webBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+      },
+      defaultRootObject: 'index.html',
+      // SPA fallback: 403/404 from S3 (route not present) -> serve index.html
+      // so client-side routing can handle the URL.
+      errorResponses: [
+        { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
+        { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
+      ],
+    });
+
+    const cloudFrontUrl = `https://${distribution.distributionDomainName}`;
+
+    // ---------- Cognito (callback URLs now include CloudFront + localhost) ----------
     const userPool = new cognito.UserPool(this, 'UserPool', {
       userPoolName: 'team-vault-lite-users',
       selfSignUpEnabled: true,
@@ -48,8 +81,14 @@ export class TeamVaultLiteStack extends cdk.Stack {
           cognito.OAuthScope.EMAIL,
           cognito.OAuthScope.PROFILE,
         ],
-        callbackUrls: ['https://example.com/callback'],
-        logoutUrls: ['https://example.com/'],
+        callbackUrls: [
+          `${cloudFrontUrl}/callback`,
+          'http://localhost:5173/callback', // Vite dev server
+        ],
+        logoutUrls: [
+          `${cloudFrontUrl}/`,
+          'http://localhost:5173/',
+        ],
       },
       preventUserExistenceErrors: true,
     });
@@ -59,7 +98,7 @@ export class TeamVaultLiteStack extends cdk.Stack {
       authorizerName: 'team-vault-lite-auth',
     });
 
-    // ---------- DynamoDB (new in D4) ----------
+    // ---------- DynamoDB ----------
     const vaultTable = new dynamodb.Table(this, 'VaultTable', {
       tableName: 'team-vault-lite',
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
@@ -68,7 +107,7 @@ export class TeamVaultLiteStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // ---------- KMS (new in D5) ----------
+    // ---------- KMS ----------
     const vaultKey = new kms.Key(this, 'VaultKey', {
       alias: 'team-vault-lite/dek',
       description: 'Master key for Team Vault Lite envelope encryption',
@@ -76,7 +115,7 @@ export class TeamVaultLiteStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // ---------- Lambda (was HelloFunction, now SecretsFunction) ----------
+    // ---------- Lambda ----------
     const secretsFn = new NodejsFunction(this, 'SecretsFunction', {
       runtime: lambda.Runtime.NODEJS_22_X,
       entry: path.join(__dirname, '../../app/secrets-handler/index.ts'),
@@ -88,22 +127,23 @@ export class TeamVaultLiteStack extends cdk.Stack {
         KMS_KEY_ID: vaultKey.keyId,
       },
       timeout: cdk.Duration.seconds(10),
-      bundling: {
-        externalModules: ['@aws-sdk/*'],
-      },
+      bundling: { externalModules: ['@aws-sdk/*'] },
     });
 
     vaultTable.grantReadWriteData(secretsFn);
-    // CDK's grantEncryptDecrypt updates BOTH sides of the double grant
-    // (key policy AND identity policy) automatically — the friction this
-    // helper abstracts is logged in pain-log.md.
     vaultKey.grantEncryptDecrypt(secretsFn);
 
-    // ---------- API Gateway routes (was /hello, now /secrets + /secrets/{id}) ----------
+    // ---------- API Gateway with CORS (CORS new in D6) ----------
     const api = new apigateway.RestApi(this, 'HelloApi', {
       restApiName: 'team-vault-lite-api',
-      deployOptions: {
-        stageName: 'prod',
+      deployOptions: { stageName: 'prod' },
+      // Default CORS: OPTIONS preflight returns these headers automatically.
+      // Cognito authorizer is NOT attached to OPTIONS (CDK handles this).
+      defaultCorsPreflightOptions: {
+        allowOrigins: [cloudFrontUrl, 'http://localhost:5173'],
+        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowHeaders: ['Authorization', 'Content-Type'],
+        maxAge: cdk.Duration.minutes(10),
       },
     });
 
@@ -119,6 +159,25 @@ export class TeamVaultLiteStack extends cdk.Stack {
 
     const secretByIdResource = secretsResource.addResource('{id}');
     secretByIdResource.addMethod('GET', integration, methodOptions);
+
+    // Gateway responses (4xx/5xx errors generated by API Gateway itself,
+    // e.g. Cognito authorizer rejection) need CORS headers too — separate
+    // from preflight and from Lambda response headers. This is the third
+    // CORS gap newcomers hit.
+    api.addGatewayResponse('Default4xxCors', {
+      type: apigateway.ResponseType.DEFAULT_4XX,
+      responseHeaders: {
+        'Access-Control-Allow-Origin': "'*'",
+        'Access-Control-Allow-Headers': "'Authorization,Content-Type'",
+      },
+    });
+    api.addGatewayResponse('Default5xxCors', {
+      type: apigateway.ResponseType.DEFAULT_5XX,
+      responseHeaders: {
+        'Access-Control-Allow-Origin': "'*'",
+        'Access-Control-Allow-Headers': "'Authorization,Content-Type'",
+      },
+    });
 
     // ---------- Outputs ----------
     new cdk.CfnOutput(this, 'ApiUrl', {
@@ -143,11 +202,23 @@ export class TeamVaultLiteStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'VaultKeyId', {
       value: vaultKey.keyId,
-      description: 'KMS CMK key ID for vault envelope encryption',
+      description: 'KMS CMK key ID',
     });
     new cdk.CfnOutput(this, 'VaultKeyArn', {
       value: vaultKey.keyArn,
       description: 'KMS CMK key ARN',
+    });
+    new cdk.CfnOutput(this, 'WebBucketName', {
+      value: webBucket.bucketName,
+      description: 'S3 bucket for web UI assets',
+    });
+    new cdk.CfnOutput(this, 'CloudFrontUrl', {
+      value: cloudFrontUrl,
+      description: 'CloudFront distribution URL (your web UI lives here)',
+    });
+    new cdk.CfnOutput(this, 'CloudFrontDistributionId', {
+      value: distribution.distributionId,
+      description: 'CloudFront distribution ID (for cache invalidation)',
     });
   }
 }
