@@ -126,6 +126,55 @@ Copy this block for each new entry:
 - **Service(s)**: AWS CDK + IAM + CloudFormation
 - **Severity**: medium-high — invisible IAM is the worst IAM. Every CDK user passes through this step; no one is warned.
 
+### 2026-05-14 — KMS access requires alignment between key policy and identity policy, but the default delegation rule makes the requirement invisible
+
+- **What I was trying to do**: Understand how `vaultKey.grantEncryptDecrypt(secretsFn)` actually works after deploying. Inspected both the KMS key policy and the Lambda's identity policy in the live account.
+- **Friction**: The deployed state surprised me. The KMS key policy has **exactly one statement** — `Effect: Allow, Principal: root, Action: kms:*`. The Lambda role's identity policy has the four KMS actions on the key ARN. The Lambda role is **not mentioned anywhere in the key policy**. Yet encryption and decryption work fine. The reason is a subtle KMS rule that AWS docs gesture at but don't emphasize: **if the key policy grants `kms:*` to the account root, then IAM policies in that account can implicitly grant access to the key.** This is called "IAM delegation" and it's the default behavior. Most documentation describes KMS access as requiring a "double grant" (key policy + identity policy), but in the default case identity policy alone is sufficient *because* the key policy already delegated. This means:
+  1. A newcomer reading docs about "you need both policies aligned" sees only the identity-policy half and concludes the docs are wrong (or that CDK is doing magic).
+  2. A security-minded user who "tightens" the key policy by removing the root grant (thinking it's overly permissive) will silently break every IAM-based grant on that key — including the CDK-managed ones — without realizing they made the change.
+  3. The contract between key policy and identity policy is bidirectional but the "default delegation" mode obscures it.
+- **What would have been easier**: 
+  - A clear flowchart in KMS docs: *"With default key policy → identity policy alone suffices. Without root grant in key policy → both policies must explicitly allow."*
+  - A warning when removing/restricting the root grant: *"Removing this statement will break all IAM-delegated access to this key."*
+  - CDK's `grantEncryptDecrypt` output: *"This grant added to identity policy. It works because the key policy delegates to IAM. If you replace the key policy, you must explicitly include this role as a principal."*
+- **Category**: Permissions / Docs
+- **Service(s)**: KMS + IAM
+- **Severity**: **high** — this is the "highest-density IAM pain point" handoff §4 predicted, but the actual shape is even more interesting than "double grant" — it's "subtle conditional double grant where the default makes the condition invisible."
+
+### 2026-05-14 — KMS access denied error tells you which side failed, but doesn't hint at the other side
+
+- **What I was trying to do**: Validate the friction story by deliberately breaking the Lambda's identity-side KMS grant. I removed the KMS statement from the Lambda's IAM role policy via CLI and called the API.
+- **Friction**: The error message was actually quite specific:
+  > *"User: arn:aws:sts::...:assumed-role/... is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:... because **no identity-based policy allows** the kms:GenerateDataKey action"*
+  
+  The good: it pinpoints the missing-permission side (identity-based), tells you the action, the principal, and the resource. This is substantially better than the historical "AccessDeniedException" with no detail.
+  
+  The bad: it does not hint that **even after fixing the identity side, you might also need the key policy to allow it**. A newcomer who adds `kms:GenerateDataKey` to the identity policy of a Lambda accessing a *non-default key policy* (e.g., one without the root grant) will fix the identity-side message, then encounter a *different* error — `"no resource-based policy allows"` — and have to debug the key policy separately. Two-step debugging where one-step messaging would have been possible.
+- **What would have been easier**: When IAM denies a KMS action, surface both sides in the same error if both are blocking: *"Access denied. Identity policy: ALLOWS / DENIES / IMPLICIT-DENY. Key policy: ALLOWS / DENIES / IMPLICIT-DENY (via account delegation: yes/no). Fix at least one side."*
+- **Category**: Permissions / Docs / Error messages
+- **Service(s)**: KMS + IAM
+- **Severity**: medium — error messages have improved a lot (this is much better than 5 years ago), but they're still one-sided when the two-sided check is the actual model.
+
+### 2026-05-14 — CDK's `grantEncryptDecrypt` adds 4 KMS actions when our Lambda uses only 2
+
+- **What I was trying to do**: Wire up the Lambda's KMS permissions to do envelope encryption — only `kms:GenerateDataKey` (on write) and `kms:Decrypt` (on read).
+- **Friction**: `vaultKey.grantEncryptDecrypt(secretsFn)` produced an identity-policy statement with **four KMS actions**: `kms:Decrypt`, `kms:Encrypt`, `kms:GenerateDataKey*`, `kms:ReEncrypt*`. My code uses two: GenerateDataKey on write and Decrypt on read. The other two — `Encrypt` and `ReEncrypt*` — are unused. `Encrypt` overlaps semantically with GenerateDataKey (both can produce ciphertext), but they're different APIs. `ReEncrypt*` is for re-encrypting an already-encrypted ciphertext under a different key — useful for key rotation, not used by my app. This mirrors the same overprovision pattern from D4's `grantReadWriteData()`: convenience helpers default broad, narrowing requires bypassing the helper entirely.
+- **What would have been easier**:
+  - More granular helpers — `grantGenerateDataKey()` and `grantDecrypt()` as separate methods (CDK does have these, but the broader `grantEncryptDecrypt` is what's surfaced in tutorials).
+  - A "least-privilege mode" flag on the convenience helpers: `grantEncryptDecrypt(fn, { onlyActions: ['Decrypt', 'GenerateDataKey'] })`.
+- **Category**: Permissions / Tooling
+- **Service(s)**: AWS CDK + IAM + KMS
+- **Severity**: low — pattern is now well-established across CDK helpers; cumulative effect is real.
+
+### 2026-05-14 — `aws kms get-key-policy` rejects key aliases — CLI inconsistency in how KMS commands accept identifiers
+
+- **What I was trying to do**: Run `aws kms get-key-policy --key-id alias/team-vault-lite/dek --policy-name default` to inspect the deployed key policy. Using the alias seemed natural since the alias was the only friendly identifier I had memorized.
+- **Friction**: Got `InvalidArnException: Key Aliases are not supported for this operation`. Had to switch to the raw key ID (`ec091839-808d-4059-988b-d64e4167b6fd`) which I had to look up from CDK outputs. Other KMS CLI commands (`aws kms encrypt`, `aws kms decrypt`) do accept aliases. The acceptance of identifier types — alias, key ID, key ARN — varies command-by-command without an obvious pattern. As a newcomer trying to be productive, I have to learn this inconsistency by trial-and-error.
+- **What would have been easier**: All KMS commands accept all identifier types uniformly. Or, if there's a technical reason for the inconsistency, surface it in the error: *"This operation requires a key ID or ARN. Aliases are not supported because [reason]. Resolve your alias with `aws kms describe-key --key-id alias/your-alias`."*
+- **Category**: Tooling / Docs
+- **Service(s)**: AWS KMS CLI
+- **Severity**: low — a 30-second annoyance per occurrence, but it adds up because KMS commands are common during debugging.
+
 ### 2026-05-14 — CDK's `grantReadWriteData()` overprovisions: 11 DynamoDB actions for an app that needs 3
 
 - **What I was trying to do**: Grant my Lambda the permissions it needs to read/write a DynamoDB table. Used CDK's convenience method `table.grantReadWriteData(lambdaFn)`.

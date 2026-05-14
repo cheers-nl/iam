@@ -6,6 +6,7 @@ import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as kms from 'aws-cdk-lib/aws-kms';
 
 export class TeamVaultLiteStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -67,6 +68,14 @@ export class TeamVaultLiteStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---------- KMS (new in D5) ----------
+    const vaultKey = new kms.Key(this, 'VaultKey', {
+      alias: 'team-vault-lite/dek',
+      description: 'Master key for Team Vault Lite envelope encryption',
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---------- Lambda (was HelloFunction, now SecretsFunction) ----------
     const secretsFn = new NodejsFunction(this, 'SecretsFunction', {
       runtime: lambda.Runtime.NODEJS_22_X,
@@ -76,6 +85,7 @@ export class TeamVaultLiteStack extends cdk.Stack {
       depsLockFilePath: path.join(__dirname, '../../app/package-lock.json'),
       environment: {
         TABLE_NAME: vaultTable.tableName,
+        KMS_KEY_ID: vaultKey.keyId,
       },
       timeout: cdk.Duration.seconds(10),
       bundling: {
@@ -83,9 +93,11 @@ export class TeamVaultLiteStack extends cdk.Stack {
       },
     });
 
-    // D4 grants broad read/write on the entire table. D4 stretch will attempt
-    // to narrow this with condition keys (and document the friction).
     vaultTable.grantReadWriteData(secretsFn);
+    // CDK's grantEncryptDecrypt updates BOTH sides of the double grant
+    // (key policy AND identity policy) automatically — the friction this
+    // helper abstracts is logged in pain-log.md.
+    vaultKey.grantEncryptDecrypt(secretsFn);
 
     // ---------- API Gateway routes (was /hello, now /secrets + /secrets/{id}) ----------
     const api = new apigateway.RestApi(this, 'HelloApi', {
@@ -128,6 +140,14 @@ export class TeamVaultLiteStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'VaultTableName', {
       value: vaultTable.tableName,
       description: 'DynamoDB vault table name',
+    });
+    new cdk.CfnOutput(this, 'VaultKeyId', {
+      value: vaultKey.keyId,
+      description: 'KMS CMK key ID for vault envelope encryption',
+    });
+    new cdk.CfnOutput(this, 'VaultKeyArn', {
+      value: vaultKey.keyArn,
+      description: 'KMS CMK key ARN',
     });
   }
 }

@@ -5,14 +5,22 @@ import {
   QueryCommand,
   GetCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { randomUUID } from 'crypto';
+import {
+  KMSClient,
+  GenerateDataKeyCommand,
+  DecryptCommand,
+} from '@aws-sdk/client-kms';
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'crypto';
 import type {
   APIGatewayProxyEvent,
   APIGatewayProxyResult,
 } from 'aws-lambda';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
+const KMS_KEY_ID = process.env.KMS_KEY_ID!;
+
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const kms = new KMSClient({});
 
 const pkForUser = (sub: string) => `USER#${sub}`;
 const skForSecret = (secretId: string) => `SECRET#${secretId}`;
@@ -22,6 +30,81 @@ const json = (statusCode: number, body: unknown): APIGatewayProxyResult => ({
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 });
+
+type EncryptedPayload = {
+  ciphertext: string; // base64
+  iv: string;         // base64
+  authTag: string;    // base64
+  encryptedDek: string; // base64
+};
+
+async function encryptValue(plaintext: string, sub: string): Promise<EncryptedPayload> {
+  // Step 1: ask KMS to generate a data key. Returns plaintext DEK + encrypted DEK.
+  const dataKeyResp = await kms.send(
+    new GenerateDataKeyCommand({
+      KeyId: KMS_KEY_ID,
+      KeySpec: 'AES_256',
+      // Encryption context binds the encrypted DEK to a specific user.
+      // Decrypt will only succeed if the same context is presented.
+      EncryptionContext: { userSub: sub },
+    })
+  );
+
+  const plainDek = dataKeyResp.Plaintext as Uint8Array;
+  const encryptedDek = dataKeyResp.CiphertextBlob as Uint8Array;
+  const iv = randomBytes(12); // GCM standard IV length
+
+  try {
+    // Step 2: AES-256-GCM encrypt locally with the plain DEK.
+    const cipher = createCipheriv('aes-256-gcm', plainDek, iv);
+    const ciphertextChunks = [
+      cipher.update(plaintext, 'utf8'),
+      cipher.final(),
+    ];
+    const ciphertext = Buffer.concat(ciphertextChunks);
+    const authTag = cipher.getAuthTag();
+
+    return {
+      ciphertext: ciphertext.toString('base64'),
+      iv: iv.toString('base64'),
+      authTag: authTag.toString('base64'),
+      encryptedDek: Buffer.from(encryptedDek).toString('base64'),
+    };
+  } finally {
+    // Step 3: destroy plain DEK in memory.
+    // (Node doesn't let us zero a Uint8Array reliably across GC, but
+    // overwriting reduces the window during which it sits in memory.)
+    plainDek.fill(0);
+  }
+}
+
+async function decryptValue(payload: EncryptedPayload, sub: string): Promise<string> {
+  // Step 1: ask KMS to decrypt the encrypted DEK.
+  const decryptResp = await kms.send(
+    new DecryptCommand({
+      CiphertextBlob: Buffer.from(payload.encryptedDek, 'base64'),
+      EncryptionContext: { userSub: sub },
+    })
+  );
+  const plainDek = decryptResp.Plaintext as Uint8Array;
+
+  try {
+    // Step 2: AES-256-GCM decrypt locally.
+    const decipher = createDecipheriv(
+      'aes-256-gcm',
+      plainDek,
+      Buffer.from(payload.iv, 'base64')
+    );
+    decipher.setAuthTag(Buffer.from(payload.authTag, 'base64'));
+    const plaintextChunks = [
+      decipher.update(Buffer.from(payload.ciphertext, 'base64')),
+      decipher.final(),
+    ];
+    return Buffer.concat(plaintextChunks).toString('utf8');
+  } finally {
+    plainDek.fill(0);
+  }
+}
 
 export const handler = async (
   event: APIGatewayProxyEvent
@@ -48,7 +131,7 @@ export const handler = async (
     return json(404, { error: 'route not found', resource, method });
   } catch (err: any) {
     console.error('handler error', err);
-    return json(500, { error: err?.message ?? 'internal error' });
+    return json(500, { error: err?.message ?? 'internal error', name: err?.name });
   }
 };
 
@@ -64,6 +147,7 @@ async function createSecret(
 
   const secretId = randomUUID();
   const now = new Date().toISOString();
+  const encrypted = await encryptValue(password, sub);
 
   await ddb.send(
     new PutCommand({
@@ -77,8 +161,11 @@ async function createSecret(
         usernameHint: usernameHint ?? null,
         category: category ?? 'GENERAL',
         notes: notes ?? null,
-        // NOTE: D4 stores password in plaintext. D5 will switch to KMS envelope encryption.
-        password,
+        // Envelope-encrypted password fields:
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        authTag: encrypted.authTag,
+        encryptedDek: encrypted.encryptedDek,
         createdAt: now,
         createdBy: sub,
       },
@@ -97,9 +184,8 @@ async function listSecrets(sub: string): Promise<APIGatewayProxyResult> {
         ':pk': pkForUser(sub),
         ':skPrefix': 'SECRET#',
       },
-      // Return only metadata — never password — on list.
-      ProjectionExpression:
-        'secretId, title, loginUrl, category, createdAt',
+      // Metadata only; never include ciphertext on list.
+      ProjectionExpression: 'secretId, title, loginUrl, category, createdAt',
     })
   );
 
@@ -131,15 +217,25 @@ async function getSecret(
     return json(404, { error: 'not found' });
   }
 
+  const item = result.Item;
+  const password = await decryptValue(
+    {
+      ciphertext: item.ciphertext,
+      iv: item.iv,
+      authTag: item.authTag,
+      encryptedDek: item.encryptedDek,
+    },
+    sub
+  );
+
   return json(200, {
-    id: result.Item.secretId,
-    title: result.Item.title,
-    loginUrl: result.Item.loginUrl,
-    usernameHint: result.Item.usernameHint,
-    category: result.Item.category,
-    notes: result.Item.notes,
-    // D4 returns plaintext password — D5 will decrypt via KMS.
-    password: result.Item.password,
-    createdAt: result.Item.createdAt,
+    id: item.secretId,
+    title: item.title,
+    loginUrl: item.loginUrl,
+    usernameHint: item.usernameHint,
+    category: item.category,
+    notes: item.notes,
+    password,
+    createdAt: item.createdAt,
   });
 }
