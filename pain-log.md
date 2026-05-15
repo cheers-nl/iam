@@ -126,6 +126,58 @@ Copy this block for each new entry:
 - **Service(s)**: AWS CDK + IAM + CloudFormation
 - **Severity**: medium-high — invisible IAM is the worst IAM. Every CDK user passes through this step; no one is warned.
 
+### 2026-05-14 — IAM Access Analyzer validate-policy misses overprovisioning by design — the policy "passes" while the unused-access analyzer flags it
+
+- **What I was trying to do**: Run `aws accessanalyzer validate-policy` on our deployed Lambda execution policy to see what AA reports. The policy is the one we observed to overprovision in earlier pain log entries (12 DynamoDB actions for 3 used, 4 KMS actions for 2 used).
+- **Friction**: validate-policy returned `"findings": []` — clean bill of health. Yet we know from inspecting the code that the policy grants 9 actions the Lambda never invokes. The reason: **validate-policy is a syntax + best-practices check, not a usage check**. It cannot know whether a given action is "used" by the application code — it only knows whether the policy is well-formed and avoids known-dangerous patterns (PassRole wildcards, malformed condition keys, etc.). To detect overprovisioning, you need a different AA tool: the *unused-access analyzer* (separate API, separate provisioning, separate findings) which observes actual runtime usage over time.
+  This **split between two AA tools for two related problems** is undocumented at the "getting started" level. A newcomer who runs validate-policy and gets a clean result will reasonably conclude their policy is fine. They have no signal that they should ALSO be running unused-access. Two tools, two integrations, two findings models — for what feels like "one question: is this policy any good?"
+- **What would have been easier**:
+  - AA validate-policy's empty-findings response could include an explicit note: *"Static analysis passed. To check whether granted permissions are actually used by your workloads, enable the unused-access analyzer: <link>."*
+  - Or unify the two views in a single CLI command: `aws accessanalyzer analyze-policy --policy-arn ... --include-usage` that returns both syntax findings and usage-based findings.
+- **Category**: Permissions / Docs / Tooling
+- **Service(s)**: AWS IAM Access Analyzer
+- **Severity**: medium — users who only know validate-policy never discover the more valuable unused-access feature.
+
+### 2026-05-14 — AA validate-policy gives misleading errors for IAM trust policies unless you know the `--validate-policy-resource-type` hint
+
+- **What I was trying to do**: Validate a deliberately bad trust policy (`Principal: "*"` allowing anyone to assume) to see what AA flags.
+- **Friction**: First attempt used `--policy-type RESOURCE_POLICY` (which is correct — trust policies are a kind of resource policy). AA responded with: *"MISSING_RESOURCE: Add a Resource or NotResource element to the policy statement."* This is **wrong for trust policies** — IAM role trust policies do not take a `Resource` element; the resource is implicit (the role being assumed). The error sent me on a 10-minute side quest checking whether I had to add a `Resource` field somewhere. Eventually I discovered the secret incantation: pass `--validate-policy-resource-type 'AWS::IAM::AssumeRolePolicyDocument'`. With that hint, AA stops complaining about the missing Resource — because it now knows it's a trust policy. The hint isn't surfaced prominently in docs; the `--policy-type RESOURCE_POLICY` flag *should* be enough on its own, but isn't.
+- **What would have been easier**:
+  - AA could detect that a policy with `Principal: {"AWS": ...}, "Action": "sts:AssumeRole"` is overwhelmingly likely a trust policy and validate it as such without requiring the resource-type hint.
+  - Or, when MISSING_RESOURCE is reported, append: *"If this is a role trust policy, validate with `--validate-policy-resource-type AWS::IAM::AssumeRolePolicyDocument` instead."*
+- **Category**: Tooling / Docs
+- **Service(s)**: AWS IAM Access Analyzer
+- **Severity**: medium — wastes time for anyone validating a trust policy for the first time.
+
+### 2026-05-14 — AA validate-policy MISSES `Principal: "*"` in trust policies — the canonical IAM mistake passes the analyzer
+
+- **What I was trying to do**: With the correct `--validate-policy-resource-type AWS::IAM::AssumeRolePolicyDocument` flag set, validate a trust policy that allows ANY AWS principal (`Principal: {"AWS": "*"}`) to assume the role — no Condition. This is the canonical configuration that has caused real-world breaches (Capital One, etc.).
+- **Friction**: AA's validate-policy returned **zero findings**. The most-dangerous-by-far pattern in IAM trust policies — public assumability with no Condition — passes AA's static validator clean. The presumed reason: AA expects this kind of risk to be caught by its *external-access analyzer* (the continuous one) when the policy is actually attached to a resource. But validate-policy is positioned in tooling and docs as "the synchronous policy check you run before deploying" — exactly the moment when you'd want to be warned about a Principal-star trust policy *before* it reaches AWS. The two AA tools have non-overlapping coverage of the most important IAM mistake, and validate-policy is the one users reach for first.
+- **What would have been easier**:
+  - validate-policy should treat `Principal: "*"` (or `Principal: {"AWS": "*"}`) without a Condition as at least a SECURITY_WARNING — even if the external-access analyzer also flags it later. Static catching beats runtime catching for a deploy-time guard.
+  - Or, doc the gap explicitly: *"validate-policy does not flag overly broad principals; for that, attach the policy to a resource and the external-access analyzer will detect it."*
+- **Category**: Permissions / Docs
+- **Service(s)**: AWS IAM Access Analyzer
+- **Severity**: **high** — this is the highest-impact IAM mistake and AA's most-reached-for tool doesn't catch it. The IAM team should care most about this.
+
+### 2026-05-14 — AA unused-access analyzer is fast and effective, and independently validates the CDK bootstrap overprovisioning observation from D2
+
+- **What I was trying to do**: Enable the unused-access analyzer to see whether it would flag the overprovisioning we observed in D2 / D4 / D5 pain log entries (CDK bootstrap roles, grantReadWriteData, grantEncryptDecrypt — all granting more permissions than the application uses).
+- **Friction (positive — captured as a counter-example)**: AWS docs say initial scan "can take several hours." Actual experience: I created the analyzer at 01:33:56 UTC. The first findings appeared at 01:34:51 UTC — **55 seconds later**. AA flagged exactly what I'd predicted from manual inspection:
+  - `cdk-hnb659fds-cfn-exec-role` — UnusedPermission (validates D2 pain log entry on AdministratorAccess overprovision)
+  - `cdk-hnb659fds-{deploy,lookup,file-publishing}-role` — UnusedPermission (validates the "5 roles, all broad" observation)
+  - `cdk-hnb659fds-image-publishing-role` — **UnusedIAMRole** (the entire role is unused, because we use zip-based not container-based Lambdas — exactly the architecture decision I noted in D5)
+  - The SSO AdministratorAccess role — UnusedPermission (expected for any admin role)
+  - A pile of leftover personal IAM users (`Jane`, `David`, etc.) — UnusedIAMUserPassword + UnusedPermission
+  
+  This is one of the strongest positive signals in the project: **AA's unused-access analyzer works, is fast, and produces actionable findings**. The pain log up to D6 has been weighted toward IAM frustrations; this entry is a counter-example. **The IAM team has a really good product here that newcomers often don't enable.**
+- **What would have been easier**:
+  - Make unused-access analyzer **on by default** in new accounts, or surface it prominently in the IAM console landing page (currently buried under "Access Analyzer" in the left nav).
+  - Update docs to remove the misleading "scan can take hours" — for small accounts it's near-realtime.
+- **Category**: Permissions / Tooling / Docs
+- **Service(s)**: AWS IAM Access Analyzer
+- **Severity**: low (this is a *positive* finding) — but the docs UX (misleading "hours" claim, discoverability of unused-access vs validate-policy) is real and should improve to widen adoption.
+
 ### 2026-05-14 — CORS is half-abstracted in CDK: preflight via stack config, response headers via Lambda code — the seam is undocumented and the failure mode is silent
 
 - **What I was trying to do**: Wire up the React SPA on CloudFront to call the Cognito-protected API on a different origin. Configured `defaultCorsPreflightOptions` on the API Gateway construct, assumed CORS was now "done."
