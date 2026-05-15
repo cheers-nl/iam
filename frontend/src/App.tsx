@@ -94,7 +94,17 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  return fetch(`${API_URL}${path}`, { ...init, headers });
+  const response = await fetch(`${API_URL}${path}`, { ...init, headers });
+  // Auto-recover from token expiry: clear stale tokens, redirect to login.
+  // Without this, an expired token surfaces as a generic "Failed to fetch"
+  // because API Gateway's 401 response (gateway response, separate from
+  // Lambda) was historically missing CORS headers — captured in pain log.
+  if (response.status === 401) {
+    clearTokens();
+    window.location.href = '/';
+    throw new Error('session expired, redirecting to login');
+  }
+  return response;
 }
 
 // ------------- Components -------------
@@ -239,19 +249,28 @@ function SecretRow({ secret }: { secret: Secret }) {
       <div className="meta">
         <div>
           <div className="title">{secret.title}</div>
-          <div style={{ fontSize: 12, color: '#888' }}>
-            {secret.category} · {secret.loginUrl ?? 'no URL'} · {new Date(secret.createdAt).toLocaleString()}
+          <div className="secondary">
+            {secret.category} · {secret.loginUrl ?? 'no URL'} ·{' '}
+            {new Date(secret.createdAt).toLocaleString()}
           </div>
         </div>
         <button onClick={reveal} disabled={revealing}>
-          {detail ? 'Hide' : revealing ? 'Loading...' : 'Reveal'}
+          {detail ? 'Hide' : revealing ? 'Loading…' : 'Reveal'}
         </button>
       </div>
       {err && <div className="error">{err}</div>}
       {detail && (
         <div className="reveal">
-          {detail.usernameHint && <div>Username hint: {detail.usernameHint}</div>}
-          <div>Password: <strong>{detail.password}</strong></div>
+          {detail.usernameHint && (
+            <div style={{ marginBottom: 4 }}>
+              <span style={{ color: '#6b7280' }}>Username hint: </span>
+              {detail.usernameHint}
+            </div>
+          )}
+          <div>
+            <span style={{ color: '#6b7280' }}>Password: </span>
+            <strong>{detail.password}</strong>
+          </div>
         </div>
       )}
     </div>
@@ -295,10 +314,8 @@ function MainPage() {
     <div className="container">
       <header>
         <h1>Team Vault Lite</h1>
-        <div>
-          <span style={{ marginRight: 12, color: '#666' }}>
-            {claims?.email as string}
-          </span>
+        <div className="user-info">
+          <span className="user-email">{claims?.email as string}</span>
           <button className="danger" onClick={handleLogout}>
             Logout
           </button>
@@ -307,11 +324,11 @@ function MainPage() {
 
       <CreateForm onCreated={refresh} />
 
-      <h3>Your secrets</h3>
+      <h3 className="section-heading">Your secrets</h3>
       {err && <div className="error">{err}</div>}
-      {loading && <div>Loading...</div>}
+      {loading && <div className="loading">Loading…</div>}
       {!loading && secrets.length === 0 && (
-        <div className="empty">No secrets yet. Create one above.</div>
+        <div className="empty">No secrets yet — create one above to get started.</div>
       )}
       {secrets.map((s) => (
         <SecretRow key={s.id} secret={s} />
