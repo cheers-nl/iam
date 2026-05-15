@@ -126,6 +126,99 @@ Copy this block for each new entry:
 - **Service(s)**: AWS CDK + IAM + CloudFormation
 - **Severity**: medium-high — invisible IAM is the worst IAM. Every CDK user passes through this step; no one is warned.
 
+### 2026-05-14 — Built an AI policy advisor on Bedrock; it caught 4 of 5 patterns that AA validate-policy missed, at ~$0.06 per policy review
+
+- **What I was trying to do**: Test the thesis that AI-assisted policy review is a high-leverage complement to AA's static `validate-policy`. Built a Bedrock-backed Lambda (Claude Opus 4.6) that takes a policy JSON, returns structured findings. Ran the same 5 test policies from D7 through both AA and the AI advisor, side by side.
+- **Empirical results** (full data in `docs/ai-vs-aa-comparison.md`):
+  | Test case | AA findings | AI findings | AI catches gap? |
+  |---|---|---|---|
+  | Our actual Lambda policy (we know it's overprovisioned) | 0 | 3 | ✅ flagged Scan + BatchWriteItem + KMS wildcards |
+  | Full admin `*:*` on `*` | 2 (PassRole/SLR specific) | 4 (full pattern + privilege escalation) | ✅ broader coverage |
+  | **`Principal: "*"` trust policy (Capital One pattern)** | **0** | **3 (public-principal HIGH + missing-condition HIGH)** | ✅ **caught the canonical IAM mistake** |
+  | `s3:GetObject` on IAM role ARN (action/resource mismatch) | 0 | 2 (explained "will never take effect") | ✅ semantic reasoning |
+  | `kms:*` on `*` | 0 | 5 (incl. `kms:PutKeyPolicy` escalation explained) | ✅ service-specific knowledge |
+  
+  **Total cost: ~$0.30 for all 5 reviews**. Per-policy cost ~$0.05–$0.07. Latency ~5–10s per review. False-positive rate: low but non-zero (AI occasionally suggested narrowing legitimate idiomatic wildcards like KMS `GenerateDataKey*`).
+  
+  **This is direct evidence for the thesis stated in pain log entry #24** ("validate-policy MISSES `Principal:*`"). AA didn't catch the canonical IAM mistake; AI did, at first invocation. AI also explained *why* each finding matters in plain language a newcomer can act on. AA's findings come as opaque issue codes (`PASS_ROLE_WITH_STAR_IN_ACTION_AND_RESOURCE`) — readable to experts, but doesn't transfer knowledge to newcomers.
+- **What this suggests**:
+  - AI-assisted policy review is **complementary** to AA, not a replacement. AA = fast structural check; AI = deeper semantic review for policies above a threshold of complexity or risk.
+  - A productized "IAM Policy Advisor" run on every `cdk diff` output, gated to policies AA marked "no findings", would cost negligibly and surface the high-impact gaps AA misses.
+  - This is **direct support for the team's OP1 simplification mandate** — the AI advisor does precisely "the hard thinking on the customer's behalf" that Kai's framing calls for.
+- **What was hard about building it**: 4-layer Bedrock access gating (covered in the preceding entries); inference-profile IAM ARN coverage across multiple regions; first-call-grace-period vs subsequent-call-blocking inconsistency. Once access was sorted, the actual Lambda code was ~120 lines.
+- **Category**: AI / Permissions / Product strategy
+- **Service(s)**: AWS Bedrock + IAM Access Analyzer + Lambda
+- **Severity**: positive observation, not friction — but the *opportunity* it points to is high-impact for the IAM team's roadmap.
+
+### 2026-05-14 — Bedrock has a FOURTH gating layer (tier/sales gate on newest top-tier models) discoverable only by trial-and-error
+
+- **What I was trying to do**: After submitting the Anthropic use-case form and triggering the Playground auto-enable for Claude Opus 4.7, run the model from CLI. Expected access to be unblocked.
+- **Friction**: Even with the use-case form approved AND the auto-enable supposedly triggered, **Opus 4.7 returns `AccessDeniedException: anthropic.claude-opus-4-7 is not available for this account. For additional access options, contact AWS Sales.`** This is a **fourth distinct gating layer** beyond the three already documented:
+  1. Region availability (inference profile routing)
+  2. Account-level auto-enable (first invocation)
+  3. Provider-specific use-case form (Anthropic)
+  4. **Sales-contact tier gate for the newest top-tier models** — undocumented in the rest of the access flow, discoverable only by trying
+  
+  To map this layer, I tested 6 Anthropic models on the same account:
+  | Model | Status |
+  |---|---|
+  | Opus 4.7 (newest top) | ❌ AccessDeniedException |
+  | Opus 4.6 | ✅ Works |
+  | Opus 4.5 | ✅ Works |
+  | Sonnet 4.6 (newest Sonnet) | ❌ AccessDeniedException |
+  | Sonnet 4.5 | ✅ Works |
+  | Haiku 4.5 (newest Haiku) | ✅ Works |
+  
+  Pattern: **The newest top-tier models (Opus 4.7, Sonnet 4.6) are sales-gated**. Haiku is not — likely because it's the cost-sensitive tier. Previous versions of the gated tiers (Opus 4.6, Sonnet 4.5) are open.
+  
+  None of this is documented at the access flow level. The "contact AWS Sales" link in the error doesn't say WHY this model specifically requires sales contact (it's a tier policy, not a per-customer block). A newcomer guesses "maybe my form wasn't processed" or "maybe I need to wait" and only discovers the tier policy by testing adjacent models.
+- **What would have been easier**:
+  - Document the sales-gating tier explicitly: *"Anthropic's newest top-tier models (Opus 4.7, Sonnet 4.6) require an AWS Sales engagement. Other Anthropic models are available with the standard use-case form. See the [tier matrix link]."*
+  - In the Model catalog UI, mark sales-gated models with a clear "Enterprise tier — contact sales" badge BEFORE the user invests time invoking them.
+  - In the error message: *"This model is in the sales-gated tier. For an equivalent open-tier model, try Opus 4.6 (one version behind, similar capability). To get Opus 4.7 access, contact AWS Sales: [link]."*
+- **Category**: Permissions / Docs / Pricing
+- **Service(s)**: AWS Bedrock + Anthropic third-party tiering
+- **Severity**: medium-high — discovering a tier you can't access by trial-and-error wastes hours; this is the kind of friction enterprise users complain about loudest.
+
+### 2026-05-14 — Bedrock Model Access page was retired, but the Anthropic use-case-form gate still exists with no clear entry point to satisfy it
+
+- **What I was trying to do**: Enable Claude Opus 4.7 + submit the Anthropic use case form so my Lambda could invoke it. Naturally navigated to Bedrock console → "Model access" page.
+- **Friction**: The "Model access" page now shows: *"Model access page has been retired. Serverless foundation models are now automatically enabled across all AWS commercial regions when first invoked in your account, so you can start using them instantly. ... Note that for Anthropic models, first-time users may need to submit use case details before they can access the model."* 
+  
+  This creates a **stranded gating step**: the page that historically housed the manual access toggle AND the use-case form is gone, but the use-case form is **still required** for Anthropic models. The retirement note acknowledges this requirement ("may need to submit use case details") but doesn't say WHERE to submit them. Trying to invoke the model from CLI produces the form-required error (which sounds like a permission issue), and the obvious-seeming next-step ("go to Model access") is gone.
+  
+  The implied new workflow appears to be: invoke the model anywhere (CLI, Playground, etc.), see the error, then somehow find the form in the Playground UI when you try to chat. But this is **never stated explicitly** in the retirement notice or in the error message. A newcomer arriving at this exact state — old page retired, new entry point not documented — is stuck guessing where to satisfy the gate.
+  
+  Two compounding observations:
+  - The retirement message says "automatically enabled when first invoked" — but my first Opus 4.7 invocation produced an "AccessDeniedException: anthropic.claude-opus-4-7 is not available for this account." The auto-enable behavior described in the retirement notice doesn't match the observed behavior for at least this model. So even the new flow doesn't actually deliver what it promises.
+  - For Anthropic models specifically, the user-case-form requirement is provider-specific (Anthropic) but the surface that gates it is service-wide (Bedrock). When AWS retires the gating UI for the service, third-party-provider-specific requirements get orphaned.
+- **What would have been easier**:
+  - The retirement notice should include explicit next-step links: *"For Anthropic models, submit the use case form here: [link]. Other providers auto-enable on first invocation."*
+  - The error message returned by `bedrock-runtime:InvokeModel` for missing-form should embed the form submission URL.
+  - For "first invocation auto-enables" to actually work, it has to work uniformly — not silently exclude certain models (Opus 4.7 in this case).
+- **Category**: Tooling / Docs / Product transitions
+- **Service(s)**: AWS Bedrock + Anthropic third-party gating
+- **Severity**: medium-high — product-transition friction is particularly painful because it strands users who arrived after the old UI was deprecated but before the new flow is fully documented.
+
+### 2026-05-14 — Bedrock model access has at least three independent gating layers and each layer produces a different cryptic error
+
+- **What I was trying to do**: Build a Lambda-based policy advisor using a Claude model on Bedrock to test the thesis that AI-assisted policy review can catch what static analyzers (Access Analyzer) miss. Started with Claude Sonnet 4.6, then switched to Opus 4.7 per project direction.
+- **Friction**: Bedrock has at least three layers of access gating, each with a different failure mode and error message — and **none of them is IAM**, even though they all feel like IAM:
+  1. **Region availability** — some models are only in certain regions. Routed through `us.anthropic.claude-*` inference profiles to abstract this, but if you call the bare foundation-model ID you get `ValidationException: Invocation of model ID ... with on-demand throughput isn't supported. Retry with an inference profile.` Confusing first-impression error — sounds like a quota issue, actually a routing requirement.
+  2. **Account-level model access** — even with the inference profile, models you haven't explicitly enabled in the Bedrock console return `AccessDeniedException: anthropic.claude-opus-4-7 is not available for this account. You can explore other available models...` Sounds like an IAM denial, actually a Bedrock console toggle you missed. **The error doesn't mention "go to Bedrock console → Model access" anywhere.**
+  3. **Use case details form (Anthropic models specifically)** — some providers (notably Anthropic) require an additional "use case details" form on top of basic access. Returns `ResourceNotFoundException: Model use case details have not been submitted for this account. Fill out the Anthropic use case details form before using the model.` And then: **"If you have already filled out the form, try again in 15 minutes"** — implying eventual consistency on this gate. Discoverable only by reading the error carefully.
+  
+  Compounding all three: my very first `aws bedrock-runtime invoke-model` call to Sonnet 4.6 actually succeeded (returned the expected text). Subsequent calls to the same model from the same account started failing with the use-case-form error. Either the first call hit some grace-period grant, or the gating cache was stale — but the inconsistency leaves a newcomer thinking "I clearly had access, what changed?"
+  
+  These three layers compound: a developer enabling Bedrock for the first time can hit each layer in sequence, each with a different error, each requiring a different fix in a different UI. None of the errors point to the right next step.
+- **What would have been easier**:
+  - Bedrock errors should explicitly route the user: *"AccessDeniedException for model X. To enable: open https://console.aws.amazon.com/bedrock/home?#/modelaccess and toggle access for X."* Same for the use-case form.
+  - Consolidate the three gating layers (region routing, account enablement, provider-specific forms) into a single "Bedrock access status" view with clear next steps per model.
+  - The "first call succeeds, subsequent fail" pattern is the worst kind of inconsistency. If the form is required, fail FAST on call #1; don't give an inconsistent grace period.
+- **Category**: Permissions / Tooling / Docs
+- **Service(s)**: AWS Bedrock + IAM
+- **Severity**: **medium-high** — Bedrock is the canonical "AI on AWS" service; the friction here is the IAM-for-AI surface that Kai's "AI everywhere" mandate runs through.
+
 ### 2026-05-14 — IAM Access Analyzer validate-policy misses overprovisioning by design — the policy "passes" while the unused-access analyzer flags it
 
 - **What I was trying to do**: Run `aws accessanalyzer validate-policy` on our deployed Lambda execution policy to see what AA reports. The policy is the one we observed to overprovision in earlier pain log entries (12 DynamoDB actions for 3 used, 4 KMS actions for 2 used).

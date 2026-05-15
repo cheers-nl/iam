@@ -10,6 +10,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as iam from 'aws-cdk-lib/aws-iam';
 
 export class TeamVaultLiteStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -133,6 +134,34 @@ export class TeamVaultLiteStack extends cdk.Stack {
     vaultTable.grantReadWriteData(secretsFn);
     vaultKey.grantEncryptDecrypt(secretsFn);
 
+    // ---------- Policy Advisor Lambda (Phase A — Bedrock-backed) ----------
+    const policyAdvisorFn = new NodejsFunction(this, 'PolicyAdvisorFunction', {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      entry: path.join(__dirname, '../../app/policy-advisor/index.ts'),
+      handler: 'handler',
+      projectRoot: path.join(__dirname, '../../app'),
+      depsLockFilePath: path.join(__dirname, '../../app/package-lock.json'),
+      timeout: cdk.Duration.seconds(60),
+      bundling: { externalModules: ['@aws-sdk/*'] },
+    });
+
+    // Bedrock cross-region inference: the IAM policy must grant InvokeModel
+    // on BOTH the inference profile AND the underlying foundation models in
+    // every region the profile may route to. Missing any one of these returns
+    // an AccessDeniedException with no hint that the cross-region routing is
+    // the cause — captured separately as a pain log entry.
+    policyAdvisorFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: [
+          `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-opus-4-6-v1`,
+          `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-6-v1`,
+          `arn:aws:bedrock:us-east-2::foundation-model/anthropic.claude-opus-4-6-v1`,
+          `arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-opus-4-6-v1`,
+        ],
+      })
+    );
+
     // ---------- API Gateway with CORS (CORS new in D6) ----------
     const api = new apigateway.RestApi(this, 'HelloApi', {
       restApiName: 'team-vault-lite-api',
@@ -219,6 +248,10 @@ export class TeamVaultLiteStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CloudFrontDistributionId', {
       value: distribution.distributionId,
       description: 'CloudFront distribution ID (for cache invalidation)',
+    });
+    new cdk.CfnOutput(this, 'PolicyAdvisorFunctionName', {
+      value: policyAdvisorFn.functionName,
+      description: 'Bedrock-backed policy advisor Lambda (invoke directly)',
     });
   }
 }
