@@ -150,6 +150,58 @@ Copy this block for each new entry:
 - **Service(s)**: AWS Bedrock + IAM Access Analyzer + Lambda
 - **Severity**: positive observation, not friction — but the *opportunity* it points to is high-impact for the IAM team's roadmap.
 
+### 2026-05-15 — Cognito group changes require a token refresh — newly-assigned group is invisible to the API until the user re-authenticates
+
+- **What I was trying to do**: Test role-based access. Created a Cognito group `vault-admin`, used `aws cognito-idp admin-add-user-to-group` to add an existing user, then called the API with the user's existing ID token expecting the `cognito:groups` claim to include `vault-admin`.
+- **Friction**: The existing token still showed `cognito:groups: []`. The API treated the user as a non-admin and 403'd on admin-only endpoints. The fix wasn't obvious — group membership is stamped into the JWT at sign-in time, not read live. The user had to **fully re-authenticate** (delete the cached token, log in again via Hosted UI flow OR re-run `admin-initiate-auth`) before the new claim appeared. For a real product this means: when an admin promotes a member, the promoted member doesn't see their new permissions until they sign out and sign back in. Cognito does not surface this asymmetry in its console or in the docs for `AdminAddUserToGroup`. The only signal is the IAM-style staleness: "I'm still seeing the old role even though I just got a new one." 
+  Compounding factor: API Gateway's Cognito authorizer caches authorization decisions for 5 minutes by default. Even after re-auth, if the authorizer is in the middle of its cache window for the SAME identity, the cached "non-admin" result wins. The cache is documented but defaults to 5 minutes — quietly long for permission-change workflows.
+- **What would have been easier**:
+  - Document the "groups are stamped at token issue, not read live" semantic prominently in the AdminAddUserToGroup docs.
+  - Add a console hint: *"Members will need to sign out and sign in again before their new role takes effect."*
+  - Provide a "refresh claims" API for the user themselves to call without full re-auth (analogous to `sts:AssumeRole` refreshing session tags).
+- **Category**: Authentication / Authorization / Docs
+- **Service(s)**: Cognito + API Gateway
+- **Severity**: medium — affects every admin-promotes-member workflow; surprising the first time; trivial once you know.
+
+### 2026-05-15 — Cognito `cognito:groups` claim is sometimes a string, sometimes an array — type-unsafe across paths
+
+- **What I was trying to do**: Parse the user's groups from the ID token in my Lambda handler. Wrote `const groups = claims['cognito:groups'] as string[]; const isAdmin = groups.includes('vault-admin');`
+- **Friction**: This crashed at runtime in some configurations because `cognito:groups` is sometimes serialized as a JSON array `["vault-admin"]` and sometimes as a bracket-delimited string like `[vault-admin]` or `[vault-admin,vault-member]`. The shape depends on (a) whether the token comes through a Cognito Hosted UI flow vs `admin-initiate-auth` vs other paths, (b) whether you're decoding the token yourself vs reading from API Gateway's `event.requestContext.authorizer.claims` (the latter sometimes stringifies the array), and (c) the version of Cognito's user pool. My Lambda had to handle three cases:
+  ```js
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') return raw.replace(/^\[|\]$/g, '').split(/[,\s]+/).filter(Boolean);
+  return [];
+  ```
+  This isn't a one-time gotcha — it's a **type-unsafe permission check on every request**. If the parser is wrong, the user is silently treated as a non-admin (or worse, gets unintended admin access if a fallback is too permissive). The standard JWT claim spec says `groups` (if used) is an array; AWS's documentation acknowledges the inconsistency but doesn't fix it.
+- **What would have been easier**:
+  - Standardize the `cognito:groups` claim as an array always. Breaking change, but small surface area, and the right behavior.
+  - Provide a typed SDK helper: `getGroupsFromClaims(claims)` that handles all variants. Currently every Cognito-protected Lambda re-implements this parser.
+  - At minimum, document the variants prominently in the API Gateway Cognito authorizer docs with sample code.
+- **Category**: Authentication / Tooling / Docs
+- **Service(s)**: Cognito + API Gateway
+- **Severity**: medium-high — silent type-coercion on a permission-bearing claim is exactly the wrong place for ambiguity; one parser bug = privilege bug.
+
+### 2026-05-15 — `AdminCreateUser` + `AdminAddUserToGroup` is a two-step invitation with no atomic primitive — orphan user risk
+
+- **What I was trying to do**: Build an invitation flow. Admin enters teammate's email + role; backend creates the Cognito user and assigns them to the right group.
+- **Friction**: There is no single "invite this user with role X" API. The flow is two distinct admin actions:
+  1. `cognito-idp:AdminCreateUser` — creates the user and sends the invitation email.
+  2. `cognito-idp:AdminAddUserToGroup` — assigns the user to a group.
+  
+  If step 2 fails (network blip, throttling, expired role credentials, etc.), the user has been created and emailed an invitation — but they have **no role**. When they accept and sign in, `cognito:groups` is empty, every protected endpoint returns 403, and the support story is "we'll have to manually fix your account." There's no atomic transaction, no rollback, no built-in "create-with-groups" primitive. A correct implementation has to either:
+  - Catch the step-2 failure and call `AdminDeleteUser` to undo step 1 (and hope that succeeds).
+  - Tolerate orphans and reconcile via a periodic job.
+  - Accept the orphan-on-failure as a known operational hazard.
+  
+  We took the third path for the demo; in production the right answer is a state machine, which is a lot of code for what feels like a single conceptual operation. The deeper observation: Cognito's admin APIs were designed as standalone primitives, not as building blocks for higher-level workflows like onboarding. Every team building a team-style product on Cognito implements this same dance.
+- **What would have been easier**:
+  - A `cognito-idp:AdminCreateUserWithGroups` (or batched `WithAttributes` parameter that includes groups) — atomic in one call.
+  - Or: declarative onboarding configuration in the user pool — *"new users invited via Cognito Hosted UI automatically join group X"* — with the inviter able to override.
+  - Or: a step function template in the Cognito console for the standard invite-with-role flow.
+- **Category**: Authentication / Tooling
+- **Service(s)**: Cognito
+- **Severity**: medium — operational hazard at the moment-of-onboarding; not data-loss-bad, but every team builds the same workaround.
+
 ### 2026-05-14 — Bedrock has a FOURTH gating layer (tier/sales gate on newest top-tier models) discoverable only by trial-and-error
 
 - **What I was trying to do**: After submitting the Anthropic use-case form and triggering the Playground auto-enable for Claude Opus 4.7, run the model from CLI. Expected access to be unblocked.

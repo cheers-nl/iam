@@ -27,27 +27,59 @@ type SecretDetail = Secret & {
   password: string;
 };
 
+type AuditEvent = {
+  eventId: string;
+  action: 'CREATE' | 'REVEAL' | 'DELETE' | 'INVITE';
+  secretId: string;
+  secretTitle: string;
+  actorEmail: string | null;
+  timestamp: string;
+};
+
+type Member = {
+  username: string;
+  email: string;
+  status: string;
+  role: 'admin' | 'member';
+  createdAt: string;
+};
+
+type Whoami = {
+  sub: string;
+  email: string;
+  groups: string[];
+  isAdmin: boolean;
+};
+
 function loadTokens(): Tokens | null {
   const raw = sessionStorage.getItem(TOKEN_KEY);
   if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(raw); } catch { return null; }
 }
-
-function saveTokens(t: Tokens) {
-  sessionStorage.setItem(TOKEN_KEY, JSON.stringify(t));
-}
-
-function clearTokens() {
-  sessionStorage.removeItem(TOKEN_KEY);
-}
+function saveTokens(t: Tokens) { sessionStorage.setItem(TOKEN_KEY, JSON.stringify(t)); }
+function clearTokens() { sessionStorage.removeItem(TOKEN_KEY); }
 
 function decodeJwtPayload(jwt: string): Record<string, unknown> {
   const [, payload] = jwt.split('.');
   return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+}
+
+function rolesFromToken(token: string | undefined): { isAdmin: boolean; groups: string[]; email: string } {
+  if (!token) return { isAdmin: false, groups: [], email: '' };
+  try {
+    const claims = decodeJwtPayload(token);
+    const raw = claims['cognito:groups'];
+    let groups: string[] = [];
+    if (Array.isArray(raw)) groups = raw as string[];
+    else if (typeof raw === 'string') groups = raw.replace(/^\[|\]$/g, '').split(/[,\s]+/).filter(Boolean);
+    return {
+      groups,
+      isAdmin: groups.includes('vault-admin'),
+      email: (claims['email'] as string) ?? '',
+    };
+  } catch {
+    return { isAdmin: false, groups: [], email: '' };
+  }
 }
 
 function loginUrl(): string {
@@ -59,7 +91,6 @@ function loginUrl(): string {
   });
   return `${HOSTED_UI_BASE}/oauth2/authorize?${params}`;
 }
-
 function logoutUrl(): string {
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
@@ -67,7 +98,6 @@ function logoutUrl(): string {
   });
   return `${HOSTED_UI_BASE}/logout?${params}`;
 }
-
 async function exchangeCodeForTokens(code: string): Promise<Tokens> {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
@@ -80,9 +110,7 @@ async function exchangeCodeForTokens(code: string): Promise<Tokens> {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   });
-  if (!resp.ok) {
-    throw new Error(`Token exchange failed: ${resp.status} ${await resp.text()}`);
-  }
+  if (!resp.ok) throw new Error(`Token exchange failed: ${resp.status} ${await resp.text()}`);
   return resp.json();
 }
 
@@ -95,10 +123,6 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
     headers.set('Content-Type', 'application/json');
   }
   const response = await fetch(`${API_URL}${path}`, { ...init, headers });
-  // Auto-recover from token expiry: clear stale tokens, redirect to login.
-  // Without this, an expired token surfaces as a generic "Failed to fetch"
-  // because API Gateway's 401 response (gateway response, separate from
-  // Lambda) was historically missing CORS headers — captured in pain log.
   if (response.status === 401) {
     clearTokens();
     window.location.href = '/';
@@ -112,8 +136,8 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
 function LoginPage() {
   return (
     <div className="container login-page">
-      <h1>Team Vault Lite</h1>
-      <p>A team password vault, AWS-native demo.</p>
+      <h1>Team Vault</h1>
+      <p>Self-hosted team password vault on your own AWS infrastructure.</p>
       <a href={loginUrl()}>
         <button className="primary">Sign in with Cognito</button>
       </a>
@@ -123,7 +147,6 @@ function LoginPage() {
 
 function CallbackPage({ onComplete }: { onComplete: () => void }) {
   const [error, setError] = useState<string | null>(null);
-
   useEffect(() => {
     const code = new URLSearchParams(window.location.search).get('code');
     if (!code) {
@@ -133,29 +156,21 @@ function CallbackPage({ onComplete }: { onComplete: () => void }) {
     exchangeCodeForTokens(code)
       .then((tokens) => {
         saveTokens(tokens);
-        // Clean the URL and switch to the main page.
         window.history.replaceState({}, '', '/');
         onComplete();
       })
       .catch((e) => setError(String(e)));
   }, [onComplete]);
-
   if (error) {
     return (
       <div className="container">
         <h1>Sign-in failed</h1>
         <p className="error">{error}</p>
-        <a href="/">
-          <button>Back to home</button>
-        </a>
+        <a href="/"><button>Back to home</button></a>
       </div>
     );
   }
-  return (
-    <div className="container login-page">
-      <p>Finishing sign-in...</p>
-    </div>
-  );
+  return <div className="container login-page"><p>Finishing sign-in…</p></div>;
 }
 
 function CreateForm({ onCreated }: { onCreated: () => void }) {
@@ -182,14 +197,8 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
           category,
         }),
       });
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-      }
-      setTitle('');
-      setLoginUrlVal('');
-      setUsernameHint('');
-      setPassword('');
-      setCategory('GENERAL');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      setTitle(''); setLoginUrlVal(''); setUsernameHint(''); setPassword(''); setCategory('GENERAL');
       onCreated();
     } catch (e: any) {
       setErr(e.message ?? String(e));
@@ -200,7 +209,7 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
 
   return (
     <form className="create-form" onSubmit={submit}>
-      <h3 style={{ marginTop: 0 }}>Create secret</h3>
+      <h3>Create secret</h3>
       <input placeholder="Title (e.g., 'Company Stripe')" value={title} onChange={(e) => setTitle(e.target.value)} required />
       <input placeholder="Login URL (optional)" value={loginUrlVal} onChange={(e) => setLoginUrlVal(e.target.value)} />
       <input placeholder="Username hint (optional)" value={usernameHint} onChange={(e) => setUsernameHint(e.target.value)} />
@@ -213,34 +222,48 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
       </select>
       {err && <div className="error">{err}</div>}
       <button className="primary" type="submit" disabled={submitting}>
-        {submitting ? 'Creating...' : 'Create'}
+        {submitting ? 'Creating…' : 'Create'}
       </button>
     </form>
   );
 }
 
-function SecretRow({ secret }: { secret: Secret }) {
+function SecretRow({ secret, isAdmin, onDeleted }: {
+  secret: Secret;
+  isAdmin: boolean;
+  onDeleted: () => void;
+}) {
   const [revealing, setRevealing] = useState(false);
   const [detail, setDetail] = useState<SecretDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   async function reveal() {
-    if (detail) {
-      setDetail(null); // hide again
-      return;
-    }
+    if (detail) { setDetail(null); return; }
     setRevealing(true);
     setErr(null);
     try {
       const resp = await apiFetch(`/secrets/${secret.id}`);
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-      }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
       setDetail(await resp.json());
     } catch (e: any) {
       setErr(e.message ?? String(e));
     } finally {
       setRevealing(false);
+    }
+  }
+
+  async function del() {
+    if (!confirm(`Delete "${secret.title}"? This cannot be undone.`)) return;
+    setDeleting(true);
+    setErr(null);
+    try {
+      const resp = await apiFetch(`/secrets/${secret.id}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      onDeleted();
+    } catch (e: any) {
+      setErr(e.message ?? String(e));
+      setDeleting(false);
     }
   }
 
@@ -250,13 +273,19 @@ function SecretRow({ secret }: { secret: Secret }) {
         <div>
           <div className="title">{secret.title}</div>
           <div className="secondary">
-            {secret.category} · {secret.loginUrl ?? 'no URL'} ·{' '}
-            {new Date(secret.createdAt).toLocaleString()}
+            {secret.category} · {secret.loginUrl ?? 'no URL'} · {new Date(secret.createdAt).toLocaleString()}
           </div>
         </div>
-        <button onClick={reveal} disabled={revealing}>
-          {detail ? 'Hide' : revealing ? 'Loading…' : 'Reveal'}
-        </button>
+        <div className="row-actions">
+          <button onClick={reveal} disabled={revealing || deleting}>
+            {detail ? 'Hide' : revealing ? 'Loading…' : 'Reveal'}
+          </button>
+          {isAdmin && (
+            <button className="danger" onClick={del} disabled={deleting || revealing}>
+              {deleting ? '…' : 'Delete'}
+            </button>
+          )}
+        </div>
       </div>
       {err && <div className="error">{err}</div>}
       {detail && (
@@ -277,21 +306,201 @@ function SecretRow({ secret }: { secret: Secret }) {
   );
 }
 
+function SecretsView({ isAdmin, secrets, loading, err, onCreated, onDeleted }: {
+  isAdmin: boolean;
+  secrets: Secret[];
+  loading: boolean;
+  err: string | null;
+  onCreated: () => void;
+  onDeleted: () => void;
+}) {
+  return (
+    <>
+      {isAdmin && <CreateForm onCreated={onCreated} />}
+      {!isAdmin && (
+        <div className="info-banner">
+          You're signed in as a member — you can view and reveal secrets, but creating or deleting is admin-only.
+        </div>
+      )}
+      <h3 className="section-heading">Team secrets</h3>
+      {err && <div className="error">{err}</div>}
+      {loading && <div className="loading">Loading…</div>}
+      {!loading && secrets.length === 0 && (
+        <div className="empty">No secrets yet{isAdmin ? ' — create one above' : ' — an admin needs to add some'}.</div>
+      )}
+      {secrets.map((s) => (
+        <SecretRow key={s.id} secret={s} isAdmin={isAdmin} onDeleted={onDeleted} />
+      ))}
+    </>
+  );
+}
+
+function ActivityView() {
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function refresh() {
+    setLoading(true);
+    setErr(null);
+    try {
+      const resp = await apiFetch('/audit');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      const data = await resp.json();
+      setEvents(data.events ?? []);
+    } catch (e: any) {
+      setErr(e.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { refresh(); }, []);
+
+  function badgeClass(action: AuditEvent['action']): string {
+    if (action === 'CREATE') return 'badge-create';
+    if (action === 'REVEAL') return 'badge-reveal';
+    if (action === 'INVITE') return 'badge-invite';
+    return 'badge-delete';
+  }
+
+  return (
+    <>
+      <div className="activity-header">
+        <h3 className="section-heading">Activity log</h3>
+        <button onClick={refresh} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</button>
+      </div>
+      {err && <div className="error">{err}</div>}
+      {!loading && events.length === 0 && (
+        <div className="empty">No activity yet.</div>
+      )}
+      {events.map((e) => (
+        <div className="audit-row" key={e.eventId}>
+          <span className={`badge ${badgeClass(e.action)}`}>{e.action}</span>
+          <div className="audit-body">
+            <div className="audit-title">{e.secretTitle}</div>
+            <div className="secondary">
+              by {e.actorEmail ?? 'unknown'} · {new Date(e.timestamp).toLocaleString()}
+            </div>
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function MembersView() {
+  const [members, setMembers] = useState<Member[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<'admin' | 'member'>('member');
+  const [inviting, setInviting] = useState(false);
+  const [inviteMsg, setInviteMsg] = useState<string | null>(null);
+
+  async function refresh() {
+    setLoading(true);
+    setErr(null);
+    try {
+      const resp = await apiFetch('/members');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      const data = await resp.json();
+      setMembers(data.members ?? []);
+    } catch (e: any) {
+      setErr(e.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { refresh(); }, []);
+
+  async function invite(e: React.FormEvent) {
+    e.preventDefault();
+    setInviting(true);
+    setInviteMsg(null);
+    try {
+      const resp = await apiFetch('/members', {
+        method: 'POST',
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      setInviteMsg(`Invited ${inviteEmail} as ${inviteRole}. Cognito has emailed them a sign-in link.`);
+      setInviteEmail('');
+      setInviteRole('member');
+      refresh();
+    } catch (e: any) {
+      setInviteMsg(`Error: ${e.message ?? String(e)}`);
+    } finally {
+      setInviting(false);
+    }
+  }
+
+  return (
+    <>
+      <form className="create-form" onSubmit={invite}>
+        <h3>Invite member</h3>
+        <input
+          type="email"
+          placeholder="teammate@example.com"
+          value={inviteEmail}
+          onChange={(e) => setInviteEmail(e.target.value)}
+          required
+        />
+        <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as 'admin' | 'member')}>
+          <option value="member">Member — list + reveal</option>
+          <option value="admin">Admin — full CRUD + invite</option>
+        </select>
+        {inviteMsg && <div className={inviteMsg.startsWith('Error') ? 'error' : 'info-banner'}>{inviteMsg}</div>}
+        <button className="primary" type="submit" disabled={inviting}>
+          {inviting ? 'Inviting…' : 'Send invite'}
+        </button>
+      </form>
+
+      <h3 className="section-heading">Team members</h3>
+      {err && <div className="error">{err}</div>}
+      {loading && <div className="loading">Loading…</div>}
+      {members.map((m) => (
+        <div className="audit-row" key={m.username}>
+          <span className={`badge ${m.role === 'admin' ? 'badge-create' : 'badge-reveal'}`}>
+            {m.role.toUpperCase()}
+          </span>
+          <div className="audit-body">
+            <div className="audit-title">{m.email}</div>
+            <div className="secondary">
+              {m.status} · joined {new Date(m.createdAt).toLocaleDateString()}
+            </div>
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
 function MainPage() {
+  const [view, setView] = useState<'secrets' | 'activity' | 'members'>('secrets');
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [whoami, setWhoami] = useState<Whoami | null>(null);
+
   const tokens = loadTokens();
-  const claims = tokens ? decodeJwtPayload(tokens.id_token) : null;
+  const roles = rolesFromToken(tokens?.id_token);
+  const isAdmin = roles.isAdmin;
+
+  useEffect(() => {
+    apiFetch('/me')
+      .then((r) => r.json())
+      .then((w) => setWhoami(w))
+      .catch(() => {});
+  }, []);
 
   async function refresh() {
     setLoading(true);
     setErr(null);
     try {
       const resp = await apiFetch('/secrets');
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-      }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
       const data = await resp.json();
       setSecrets(data.secrets ?? []);
     } catch (e: any) {
@@ -301,9 +510,7 @@ function MainPage() {
     }
   }
 
-  useEffect(() => {
-    refresh();
-  }, []);
+  useEffect(() => { refresh(); }, []);
 
   function handleLogout() {
     clearTokens();
@@ -313,38 +520,63 @@ function MainPage() {
   return (
     <div className="container">
       <header>
-        <h1>Team Vault Lite</h1>
+        <h1>Team Vault</h1>
         <div className="user-info">
-          <span className="user-email">{claims?.email as string}</span>
-          <button className="danger" onClick={handleLogout}>
-            Logout
-          </button>
+          <span className={`badge ${isAdmin ? 'badge-create' : 'badge-reveal'}`}>
+            {isAdmin ? 'ADMIN' : 'MEMBER'}
+          </span>
+          <span className="user-email">{whoami?.email ?? roles.email}</span>
+          <button className="danger" onClick={handleLogout}>Logout</button>
         </div>
       </header>
 
-      <CreateForm onCreated={refresh} />
+      <nav className="tabs">
+        <button
+          className={view === 'secrets' ? 'tab active' : 'tab'}
+          onClick={() => setView('secrets')}
+        >
+          Secrets
+        </button>
+        {isAdmin && (
+          <button
+            className={view === 'activity' ? 'tab active' : 'tab'}
+            onClick={() => setView('activity')}
+          >
+            Activity
+          </button>
+        )}
+        {isAdmin && (
+          <button
+            className={view === 'members' ? 'tab active' : 'tab'}
+            onClick={() => setView('members')}
+          >
+            Members
+          </button>
+        )}
+      </nav>
 
-      <h3 className="section-heading">Your secrets</h3>
-      {err && <div className="error">{err}</div>}
-      {loading && <div className="loading">Loading…</div>}
-      {!loading && secrets.length === 0 && (
-        <div className="empty">No secrets yet — create one above to get started.</div>
+      {view === 'secrets' && (
+        <SecretsView
+          isAdmin={isAdmin}
+          secrets={secrets}
+          loading={loading}
+          err={err}
+          onCreated={refresh}
+          onDeleted={refresh}
+        />
       )}
-      {secrets.map((s) => (
-        <SecretRow key={s.id} secret={s} />
-      ))}
+      {view === 'activity' && isAdmin && <ActivityView />}
+      {view === 'members' && isAdmin && <MembersView />}
     </div>
   );
 }
 
 export function App() {
-  const [version, setVersion] = useState(0); // forces re-render after callback
+  const [version, setVersion] = useState(0);
   const path = window.location.pathname;
-
   if (path === '/callback') {
     return <CallbackPage onComplete={() => setVersion((v) => v + 1)} />;
   }
-
   const tokens = loadTokens();
   if (!tokens) return <LoginPage />;
   return <MainPage key={version} />;
