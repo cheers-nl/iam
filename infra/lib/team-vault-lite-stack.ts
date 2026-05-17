@@ -146,6 +146,7 @@ export class TeamVaultLiteStack extends cdk.Stack {
         TABLE_NAME: vaultTable.tableName,
         KMS_KEY_ID: vaultKey.keyId,
         USER_POOL_ID: userPool.userPoolId,
+        ALLOWED_ORIGINS: `${cloudFrontUrl},http://localhost:5173`,
       },
       timeout: cdk.Duration.seconds(10),
       bundling: { externalModules: ['@aws-sdk/*'] },
@@ -162,7 +163,6 @@ export class TeamVaultLiteStack extends cdk.Stack {
         actions: [
           'cognito-idp:AdminCreateUser',
           'cognito-idp:AdminAddUserToGroup',
-          'cognito-idp:AdminGetUser',
           'cognito-idp:ListUsersInGroup',
         ],
         resources: [userPool.userPoolArn],

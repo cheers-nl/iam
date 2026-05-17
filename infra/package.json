@@ -2,7 +2,9 @@
   "name": "infra",
   "version": "0.1.0",
   "scripts": {
+    "clean:compiled": "rm -rf dist bin/*.js bin/*.d.ts lib/*.js lib/*.d.ts test/*.js test/*.d.ts",
     "build": "tsc",
+    "pretest": "npm run clean:compiled",
     "watch": "tsc -w",
     "test": "jest",
     "cdk": "cdk"

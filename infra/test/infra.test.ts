@@ -113,6 +113,21 @@ describe('TeamVaultLite stack', () => {
         'cognito-idp:AdminAddUserToGroup',
       ])
     );
+    expect(allActions).not.toContain('cognito-idp:AdminGetUser');
+  });
+
+  test('Secrets Lambda gets CORS allowlist from stack-generated origins', () => {
+    const t = Template.fromStack(makeStack());
+    const functions = t.findResources('AWS::Lambda::Function');
+    const envValues = Object.values(functions).map((resource) =>
+      JSON.stringify((resource as any).Properties.Environment?.Variables ?? {})
+    );
+    expect(envValues.some((env) =>
+      env.includes('ALLOWED_ORIGINS') &&
+      env.includes('WebDistribution') &&
+      env.includes('DomainName') &&
+      env.includes('http://localhost:5173')
+    )).toBe(true);
   });
 
   test('Gateway responses include CORS headers (so 401s are visible to the browser)', () => {

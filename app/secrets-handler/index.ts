@@ -29,13 +29,15 @@ const USER_POOL_ID = process.env.USER_POOL_ID!;
 const ADMIN_GROUP = 'vault-admin';
 const MEMBER_GROUP = 'vault-member';
 
-// CORS allowlist — tighter than wildcard. Lambda echoes the request's Origin
-// back only when it matches one of these. API Gateway's preflight + gateway
-// responses are configured separately in CDK.
-const ALLOWED_ORIGINS = [
-  'https://d27nvg04sp0g9m.cloudfront.net',
-  'http://localhost:5173',
-];
+// CORS allowlist — tighter than wildcard. CDK owns the deployed CloudFront
+// domain and passes it here so this handler does not drift if the distribution
+// is recreated. API Gateway's preflight + gateway responses are configured
+// separately in CDK.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const DEFAULT_ALLOWED_ORIGIN = ALLOWED_ORIGINS[0] ?? 'http://localhost:5173';
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const kms = new KMSClient({});
@@ -50,7 +52,7 @@ const skForAudit = (timestamp: string, eventId: string) =>
 function pickAllowedOrigin(event: APIGatewayProxyEvent): string {
   const headers = event.headers ?? {};
   const origin = (headers['origin'] ?? headers['Origin'] ?? '') as string;
-  return ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return ALLOWED_ORIGINS.includes(origin) ? origin : DEFAULT_ALLOWED_ORIGIN;
 }
 
 function json(
