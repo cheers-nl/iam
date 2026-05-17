@@ -28,14 +28,14 @@ Total: **~$0.30 for 5 policy reviews** at Opus 4.6 pricing. Per-policy cost is ~
 
 **Why this matters**: AA's wildcard detection is keyed to specific dangerous actions (PassRole, ServiceLinkedRole). AI recognized the wildcard pattern as a whole AND enumerated the dangerous IAM actions it covers. Same coverage AA has, plus more.
 
-### Test 3 — Principal:* trust policy (the canonical IAM mistake — Capital One)
+### Test 3 — Principal:* trust policy (high-risk public-principal anti-pattern)
 
 | | AA | AI |
 |---|---|---|
 | Findings (correct flag) | **0** (with `--validate-policy-resource-type AWS::IAM::AssumeRolePolicyDocument`) | **3** (public-principal HIGH, missing-condition HIGH, hygiene LOW) |
 | Caught the public principal? | **No** | **Yes** — explicitly flagged as "any entity in any AWS account" |
 
-**This is the central thesis evidence**. The trust policy that AA's static validator does not catch — and that has caused real-world breaches — is exactly what AI catches. AA expects this to be caught by the *external-access* analyzer (continuous, post-deployment); AI catches it at the validate-policy moment, before the policy ever reaches AWS.
+**This is the central thesis evidence**. The trust policy that AA's static validator does not catch — public assumability with no condition — is exactly what AI catches. AA expects this to be caught by the *external-access* analyzer (continuous, post-deployment); AI catches it at the validate-policy moment, before the policy ever reaches AWS.
 
 ### Test 4 — Action/resource mismatch (`s3:GetObject` on an IAM role ARN)
 

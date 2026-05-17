@@ -30,7 +30,7 @@ The script reads `policies/*.json`, calls each tool, and writes raw responses to
 |---|---|---|---|
 | `01-lambda-actual.json` (real Lambda baseline) | 0 | 3 (hygiene + overprovision observations) | Yes |
 | `02-full-admin.json` (`"*":"*"` on `"*"`) | 2 (CreateServiceLinkedRole + PassRole warnings) | 4 (incl. wildcard-action HIGH, privilege-escalation HIGH) | Yes (deeper coverage) |
-| `03-public-trust.json` (`Principal: "*"`) | **0** | 3 (incl. **public-principal HIGH** — the Capital One pattern) | **Yes — headline catch** |
+| `03-public-trust.json` (`Principal: "*"`) | **0** | 3 (incl. **public-principal HIGH**) | **Yes — headline catch** |
 | `04-action-resource-mismatch.json` (`s3:GetObject` on IAM ARN) | 0 | 2 (incl. action-resource-mismatch HIGH) | Yes |
 | `05-kms-wildcard.json` (`kms:*` on `"*"`) | 0 | 5 (incl. wildcard-action HIGH, privilege-escalation HIGH, wildcard-resource HIGH) | Yes |
 

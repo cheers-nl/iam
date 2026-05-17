@@ -134,13 +134,13 @@ Copy this block for each new entry:
   |---|---|---|---|
   | Our actual Lambda policy (we know it's overprovisioned) | 0 | 3 | ✅ flagged Scan + BatchWriteItem + KMS wildcards |
   | Full admin `*:*` on `*` | 2 (PassRole/SLR specific) | 4 (full pattern + privilege escalation) | ✅ broader coverage |
-  | **`Principal: "*"` trust policy (Capital One pattern)** | **0** | **3 (public-principal HIGH + missing-condition HIGH)** | ✅ **caught the canonical IAM mistake** |
+  | **`Principal: "*"` trust policy (public-principal anti-pattern)** | **0** | **3 (public-principal HIGH + missing-condition HIGH)** | ✅ **caught the public-principal issue** |
   | `s3:GetObject` on IAM role ARN (action/resource mismatch) | 0 | 2 (explained "will never take effect") | ✅ semantic reasoning |
   | `kms:*` on `*` | 0 | 5 (incl. `kms:PutKeyPolicy` escalation explained) | ✅ service-specific knowledge |
   
   **Total cost: ~$0.30 for all 5 reviews**. Per-policy cost ~$0.05–$0.07. Latency ~5–10s per review. False-positive rate: low but non-zero (AI occasionally suggested narrowing legitimate idiomatic wildcards like KMS `GenerateDataKey*`).
   
-  **This is direct evidence for the thesis stated in pain log entry #24** ("validate-policy MISSES `Principal:*`"). AA didn't catch the canonical IAM mistake; AI did, at first invocation. AI also explained *why* each finding matters in plain language a newcomer can act on. AA's findings come as opaque issue codes (`PASS_ROLE_WITH_STAR_IN_ACTION_AND_RESOURCE`) — readable to experts, but doesn't transfer knowledge to newcomers.
+  **This is direct evidence for the thesis stated in pain log entry #24** ("validate-policy MISSES `Principal:*`"). AA didn't catch the public-principal issue; AI did, at first invocation. AI also explained *why* each finding matters in plain language a newcomer can act on. AA's findings come as opaque issue codes (`PASS_ROLE_WITH_STAR_IN_ACTION_AND_RESOURCE`) — readable to experts, but doesn't transfer knowledge to newcomers.
 - **What this suggests**:
   - AI-assisted policy review is **complementary** to AA, not a replacement. AA = fast structural check; AI = deeper semantic review for policies above a threshold of complexity or risk.
   - A productized "IAM Policy Advisor" run on every `cdk diff` output, gated to policies AA marked "no findings", would cost negligibly and surface the high-impact gaps AA misses.
@@ -294,16 +294,16 @@ Copy this block for each new entry:
 - **Service(s)**: AWS IAM Access Analyzer
 - **Severity**: medium — wastes time for anyone validating a trust policy for the first time.
 
-### 2026-05-14 — AA validate-policy MISSES `Principal: "*"` in trust policies — the canonical IAM mistake passes the analyzer
+### 2026-05-14 — AA validate-policy MISSES `Principal: "*"` in trust policies — high-impact public-principal mistake passes the analyzer
 
-- **What I was trying to do**: With the correct `--validate-policy-resource-type AWS::IAM::AssumeRolePolicyDocument` flag set, validate a trust policy that allows ANY AWS principal (`Principal: {"AWS": "*"}`) to assume the role — no Condition. This is the canonical configuration that has caused real-world breaches (Capital One, etc.).
-- **Friction**: AA's validate-policy returned **zero findings**. The most-dangerous-by-far pattern in IAM trust policies — public assumability with no Condition — passes AA's static validator clean. The presumed reason: AA expects this kind of risk to be caught by its *external-access analyzer* (the continuous one) when the policy is actually attached to a resource. But validate-policy is positioned in tooling and docs as "the synchronous policy check you run before deploying" — exactly the moment when you'd want to be warned about a Principal-star trust policy *before* it reaches AWS. The two AA tools have non-overlapping coverage of the most important IAM mistake, and validate-policy is the one users reach for first.
+- **What I was trying to do**: With the correct `--validate-policy-resource-type AWS::IAM::AssumeRolePolicyDocument` flag set, validate a trust policy that allows ANY AWS principal (`Principal: {"AWS": "*"}`) to assume the role — no Condition.
+- **Friction**: AA's validate-policy returned **zero findings**. Public assumability with no Condition is one of the highest-impact IAM trust-policy mistakes, but it passes AA's static validator clean. The presumed reason: AA expects this kind of risk to be caught by its *external-access analyzer* (the continuous one) when the policy is actually attached to a resource. But validate-policy is positioned in tooling and docs as "the synchronous policy check you run before deploying" — exactly the moment when you'd want to be warned about a Principal-star trust policy *before* it reaches AWS. The two AA tools have non-overlapping coverage of the most important IAM mistake, and validate-policy is the one users reach for first.
 - **What would have been easier**:
   - validate-policy should treat `Principal: "*"` (or `Principal: {"AWS": "*"}`) without a Condition as at least a SECURITY_WARNING — even if the external-access analyzer also flags it later. Static catching beats runtime catching for a deploy-time guard.
   - Or, doc the gap explicitly: *"validate-policy does not flag overly broad principals; for that, attach the policy to a resource and the external-access analyzer will detect it."*
 - **Category**: Permissions / Docs
 - **Service(s)**: AWS IAM Access Analyzer
-- **Severity**: **high** — this is the highest-impact IAM mistake and AA's most-reached-for tool doesn't catch it. The IAM team should care most about this.
+- **Severity**: **high** — this is a high-impact trust-policy mistake and AA's most-reached-for tool doesn't catch it. The IAM team should care about this.
 
 ### 2026-05-14 — AA unused-access analyzer is fast and effective, and independently validates the CDK bootstrap overprovisioning observation from D2
 

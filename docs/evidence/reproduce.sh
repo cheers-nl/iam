@@ -6,14 +6,14 @@
 #
 # Requirements:
 #   - AWS CLI configured (e.g. `aws sso login --profile personal-admin`)
-#   - jq, python3 in PATH
+#   - python3 in PATH
 #   - PolicyAdvisor Lambda deployed (CDK stack output: PolicyAdvisorFunctionName)
 #   - Bedrock model access enabled for us.anthropic.claude-opus-4-6-v1
 set -euo pipefail
 
 PROFILE="${AWS_PROFILE:-personal-admin}"
 REGION="${AWS_REGION:-us-west-2}"
-ADVISOR_FN_NAME="${POLICY_ADVISOR_FUNCTION:-$(aws cloudformation describe-stacks --stack-name TeamVaultLite --query 'Stacks[0].Outputs[?OutputKey==`PolicyAdvisorFunctionName`].OutputValue' --output text --region "$REGION")}"
+ADVISOR_FN_NAME="${POLICY_ADVISOR_FUNCTION:-$(aws cloudformation describe-stacks --stack-name TeamVaultLite --query 'Stacks[0].Outputs[?OutputKey==`PolicyAdvisorFunctionName`].OutputValue' --output text --region "$REGION" --profile "$PROFILE")}"
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 POLICIES_DIR="$DIR/policies"
@@ -40,6 +40,7 @@ for policy_file in "$POLICIES_DIR"/*.json; do
     --policy-type "$POLICY_TYPE" \
     ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
     --region "$REGION" \
+    --profile "$PROFILE" \
     > "$AA_OUT/$name.json"
 
   # AI advisor Lambda. Wraps the raw policy in the advisor's payload shape.
@@ -55,6 +56,7 @@ print(json.dumps({'policyDocument': policy, 'policyType': '$POLICY_TYPE'}))
     --payload "fileb:///tmp/advisor-payload.json" \
     --cli-binary-format raw-in-base64-out \
     --region "$REGION" \
+    --profile "$PROFILE" \
     "$AI_OUT/$name.json" > /dev/null
 done
 
