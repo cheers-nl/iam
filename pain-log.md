@@ -413,7 +413,7 @@ Copy this block for each new entry:
 - **Service(s)**: AWS KMS CLI
 - **Severity**: low — a 30-second annoyance per occurrence, but it adds up because KMS commands are common during debugging.
 
-### 2026-05-14 — CDK's `grantReadWriteData()` overprovisions: 11 DynamoDB actions for an app that needs 3
+### 2026-05-14 — CDK's `grantReadWriteData()` overprovisions: 12 DynamoDB actions for an app that needs 3
 
 - **What I was trying to do**: Grant my Lambda the permissions it needs to read/write a DynamoDB table. Used CDK's convenience method `table.grantReadWriteData(lambdaFn)`.
 - **Friction**: The CDK helper attached an IAM policy with **12 DynamoDB actions**:

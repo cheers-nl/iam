@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "dynamodb:BatchGetItem","dynamodb:BatchWriteItem","dynamodb:ConditionCheckItem",
+        "dynamodb:DeleteItem","dynamodb:DescribeTable","dynamodb:GetItem",
+        "dynamodb:GetRecords","dynamodb:GetShardIterator","dynamodb:PutItem",
+        "dynamodb:Query","dynamodb:Scan","dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:us-west-2:533335673158:table/team-vault-lite",
+      "Effect": "Allow"
+    },
+    {
+      "Action": ["kms:Decrypt","kms:Encrypt","kms:GenerateDataKey*","kms:ReEncrypt*"],
+      "Resource": "arn:aws:kms:us-west-2:533335673158:key/ec091839-808d-4059-988b-d64e4167b6fd",
+      "Effect": "Allow"
+    }
+  ]
+}

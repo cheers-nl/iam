@@ -49,6 +49,7 @@ type Whoami = {
   email: string;
   groups: string[];
   isAdmin: boolean;
+  hasVaultAccess: boolean;
 };
 
 function loadTokens(): Tokens | null {
@@ -64,8 +65,8 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> {
   return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
 }
 
-function rolesFromToken(token: string | undefined): { isAdmin: boolean; groups: string[]; email: string } {
-  if (!token) return { isAdmin: false, groups: [], email: '' };
+function rolesFromToken(token: string | undefined): { isAdmin: boolean; hasVaultAccess: boolean; groups: string[]; email: string } {
+  if (!token) return { isAdmin: false, hasVaultAccess: false, groups: [], email: '' };
   try {
     const claims = decodeJwtPayload(token);
     const raw = claims['cognito:groups'];
@@ -75,10 +76,11 @@ function rolesFromToken(token: string | undefined): { isAdmin: boolean; groups: 
     return {
       groups,
       isAdmin: groups.includes('vault-admin'),
+      hasVaultAccess: groups.includes('vault-admin') || groups.includes('vault-member'),
       email: (claims['email'] as string) ?? '',
     };
   } catch {
-    return { isAdmin: false, groups: [], email: '' };
+    return { isAdmin: false, hasVaultAccess: false, groups: [], email: '' };
   }
 }
 
@@ -477,6 +479,22 @@ function MembersView() {
   );
 }
 
+function NoAccessPage({ email, onLogout }: { email: string; onLogout: () => void }) {
+  return (
+    <div className="container login-page">
+      <h1>Pending vault access</h1>
+      <p>
+        You are signed in as <strong>{email}</strong>, but your account has not yet been assigned to a vault role.
+        Ask an administrator to invite you again, or to add you to <code>vault-admin</code> or <code>vault-member</code>.
+        Until then, no vault data is visible to you.
+      </p>
+      <p style={{ marginTop: 24 }}>
+        <button className="danger" onClick={onLogout}>Sign out</button>
+      </p>
+    </div>
+  );
+}
+
 function MainPage() {
   const [view, setView] = useState<'secrets' | 'activity' | 'members'>('secrets');
   const [secrets, setSecrets] = useState<Secret[]>([]);
@@ -487,6 +505,7 @@ function MainPage() {
   const tokens = loadTokens();
   const roles = rolesFromToken(tokens?.id_token);
   const isAdmin = roles.isAdmin;
+  const hasVaultAccess = roles.hasVaultAccess;
 
   useEffect(() => {
     apiFetch('/me')
@@ -515,6 +534,10 @@ function MainPage() {
   function handleLogout() {
     clearTokens();
     window.location.href = logoutUrl();
+  }
+
+  if (!hasVaultAccess) {
+    return <NoAccessPage email={roles.email} onLogout={handleLogout} />;
   }
 
   return (
