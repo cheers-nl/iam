@@ -34,7 +34,13 @@ The build is intentionally a normal customer scenario rather than an identity-on
 7. **Roles, audit, and invitation.** Refactor the vault from per-user to shared team. Create Cognito groups (`vault-admin`, `vault-member`) for roles. Gate sensitive endpoints on the `cognito:groups` claim. Add audit-log, delete, and member-invitation endpoints, each admin-only.
 8. **Policy review experiment.** Run IAM Access Analyzer's `validate-policy` and `check-no-public-access` against a small set of test policies. Build a Bedrock-backed Lambda (Claude Opus 4.6) that takes a policy and returns structured findings, and compare both tools on the same inputs.
 
-The customer problem is grounded in prior product experience with small-business teams sharing operational credentials. That prior non-AWS implementation used Postgres, a self-managed AES-256-GCM key in an environment variable, and custom audit logging. Rebuilding the same customer problem on AWS primitives made the IAM tradeoffs easier to see by comparison.
+The customer problem is grounded in prior product experience. I previously worked on **Stellen** ([stellenapp.com](https://stellenapp.com/)), a small-business team platform whose **GroupSecret** feature let organizational accounts share operational credentials (Stripe, SendGrid, social-media admins, customer-specific tokens) across their team. The GroupSecret implementation, which I helped design, held a single self-managed AES-256-GCM key in a process environment variable, kept ciphertext and the access log in Postgres, and evaluated authorization in application code. That design was a reasonable 2017-era choice — small team, single VPS, no IAM dependency, ship fast. Rebuilding the same customer problem on 2026 AWS-native primitives makes three improvements legible by comparison:
+
+1. **Key management moves from a process-bound secret to a managed boundary.** KMS issues per-secret data keys via `GenerateDataKey`, rotates the master key annually, and never exposes the master plaintext to application code. The single-env-var approach required rotation to happen in app code with downtime, and any container-image leak would have disclosed the master key.
+2. **Audit becomes tamper-evident at two layers.** CloudTrail captures every KMS `Decrypt` independent of the application audit log, so the record of who-revealed-what does not depend on the application's good behavior. In the Postgres-only implementation, an attacker with write access to the database could have erased their own reveal.
+3. **Authorization moves from application code to AWS-evaluated IAM.** Roles, scoping, and the trust between layers are declared in IAM and Cognito groups and evaluated by AWS rather than by the next engineer's `if (user.role === 'admin')` check. Access regressions become CloudFormation diffs, not silent code changes.
+
+Several friction observations later in this document are sharpened by that comparison — particularly Top 10 entry #2 (KMS double grant) and #6 (`cfn-exec-role` overprovisioning).
 
 ## Top 10 IAM Friction Observations
 
@@ -134,7 +140,7 @@ A standalone narrative analysis of the 6-fixture experiment with per-fixture fin
 
 1. **Why is a single-team credential vault worth IAM team attention?**
 
-   Single-team credential vaults exercise IAM's primitives at depth — KMS double-grant, IdC home-region permanence, IAM-scoped DynamoDB, gateway-level CORS. Every friction point this segment encounters is also encountered by larger teams building higher-stakes systems on the same primitives. The customer scenario in this report is a representative composite drawn from prior product experience with the same problem class (Appendix G); the friction surface it exposes is the friction any AWS customer building federation, audit, and credential systems in their own account will encounter.
+   Single-team credential vaults exercise IAM's primitives at depth — KMS double-grant, IdC home-region permanence, IAM-scoped DynamoDB, gateway-level CORS. Every friction point this segment encounters is also encountered by larger teams building higher-stakes systems on the same primitives. The customer scenario in this report is a representative composite drawn from prior product experience with the same problem class (see *What I Built*, final paragraph); the friction surface it exposes is the friction any AWS customer building federation, audit, and credential systems in their own account will encounter.
 
 2. **The 6-fixture sample is small. Why should these patterns generalize?**
 
@@ -176,6 +182,3 @@ A standalone narrative analysis of the 6-fixture experiment with per-fixture fin
 
 3. **First 90 days.** Have the chosen 6-pager reviewed and either green-lit or returned with a clear next step. Begin a measured-baseline study for whichever direction is chosen — for example, "what percentage of customer policies that pass `validate-policy` fail `check-no-public-access`?" — so that the second 6-pager can land with measured customer impact rather than only the newcomer-build evidence in this one.
 
-### G. Prior-art reference
-
-Team Vault was informed by prior product experience with the same customer problem at a different company. That product addressed credential sharing for small-business teams using a self-managed AES-256-GCM key held in a process environment variable, with ciphertext stored in Postgres and a custom application-level access log. The contrast between that stack and the AWS-native primitives chosen here (KMS-managed envelope encryption, CloudTrail-captured key use, DynamoDB-backed audit, IAM-scoped access via Cognito groups) sharpened several of the friction observations above — particularly Top 10 entry #2 (KMS double grant), #6 (`cfn-exec-role` overprovisioning), and the AI advisor experiment.
