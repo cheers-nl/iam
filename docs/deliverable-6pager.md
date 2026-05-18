@@ -77,7 +77,7 @@ The fixture in full:
 }]}
 ```
 
-`validate-policy` returns the same two findings it returns on any `*:*` policy (`PASS_ROLE_WITH_STAR_IN_RESOURCE`, `CREATE_SERVICE_LINKED_ROLE_WITH_STAR_IN_ACTION`). The `Sid` content is not material to its analysis.
+`validate-policy` returns the same two findings it returns on any `*:*` policy (`PASS_ROLE_WITH_STAR_IN_ACTION_AND_RESOURCE`, `CREATE_SLR_WITH_STAR_IN_ACTION_AND_RESOURCE`). The `Sid` content is not material to its analysis.
 
 The advisor returns four findings. Three are the expected reasoning about wildcard actions, missing conditions, and privilege escalation. The fourth, severity `LOW`:
 
@@ -99,7 +99,7 @@ The ten observations cluster into three simplification levers I would prioritize
 
 Three patterns from this build are the kind of "right answer" the team is already producing. They are worth naming because they show the simplification path.
 
-**Unused Access Analyzer** produced findings within 55 seconds and independently surfaced the CDK execution-role overprovisioning concern that I had only suspected. Its strength is that it watches actual runtime behavior, not declarative policy intent — exactly the data structural analyzers cannot have. **Origin Access Control** replaced Origin Access Identity as the recommended CloudFront-to-S3 access pattern, and CDK's `S3BucketOrigin.withOriginAccessControl` made the transition almost invisible. The reason OAC is better: the S3 bucket policy points to the OAC identity directly rather than to a service principal with an OAI-ID condition, so the failure mode where someone forgets to update the OAI ID in the bucket policy simply no longer exists. **CDK grant helpers** prevented many hand-written policy mistakes even when they over-granted, because the alternative — hand-rolled `actions: [...]` lists — fails open more often than it fails closed.
+**Unused Access Analyzer** produced findings within 55 seconds and independently surfaced the CDK execution-role overprovisioning concern that I had only suspected. Its strength is that it watches actual runtime behavior, not declarative policy intent — exactly the data structural analyzers cannot have. **Origin Access Control** replaced Origin Access Identity as the recommended CloudFront-to-S3 access pattern, and CDK's `S3BucketOrigin.withOriginAccessControl` made the transition almost invisible. The reason OAC is better: the S3 bucket policy scopes access via a service principal (`cloudfront.amazonaws.com`) constrained by an `AWS:SourceArn` condition pinning the specific distribution, rather than via a canonical-user OAI identity that the bucket policy had to be re-bound to whenever the OAI was recreated. **CDK grant helpers** prevented many hand-written policy mistakes even when they over-granted, because the alternative — hand-rolled `actions: [...]` lists — fails open more often than it fails closed.
 
 Each of these is an example of the right product pattern: AWS encoded a previously implicit best practice into a higher-level abstraction. The strongest product path forward is more of this, not "IAM lacks capability."
 
@@ -109,10 +109,10 @@ Each of these is an example of the right product pattern: AWS encoded a previous
 
 ### A. Links and demo access
 
-- **Live demo**: <https://d27nvg04sp0g9m.cloudfront.net> *(available through 2026-05-25; the stack is torn down within 24 hours of the D8 review to keep costs at zero. Screenshots in [`docs/screenshots/`](screenshots/) are the post-tear-down fallback.)*
+- **Live demo**: <https://d27nvg04sp0g9m.cloudfront.net> *(available through 2026-05-25; the stack is torn down within 24 hours of the D8 review to limit ongoing costs. Screenshots in [`docs/screenshots/`](screenshots/) are the post-tear-down fallback.)*
 - **Code**: <https://github.com/cheers-nl/iam>
 - **Full pain log**: [`pain-log.md`](../pain-log.md) *(32 entries across 9 services)*
-- **AI-vs-AA evidence**: [`docs/evidence/`](evidence/) *(5 fixtures + raw `validate-policy`, `check-no-public-access`, and AI advisor outputs; idempotent `reproduce.sh`)*
+- **AI-vs-AA evidence**: [`docs/evidence/`](evidence/) *(6 fixtures + raw `validate-policy`, `check-no-public-access`, and AI advisor outputs; idempotent `reproduce.sh`)*
 - **AI advisor implementation**: [`app/policy-advisor/index.ts`](../app/policy-advisor/index.ts)
 - **CDK stack**: [`infra/lib/team-vault-lite-stack.ts`](../infra/lib/team-vault-lite-stack.ts)
 
@@ -122,7 +122,7 @@ Each of these is an example of the right product pattern: AWS encoded a previous
 
    The 5% that builds inside AWS is exactly the segment that exercises IAM's primitives at depth — KMS double-grant, IdC home-region permanence, IAM-scoped DynamoDB, gateway-level CORS. Every friction point that segment hits is also hitting larger teams building higher-stakes systems on the same primitives. The customer in this report is hypothetical; the friction surface it exposes is shared with real AWS customers building federation, audit, and credential systems in their own accounts.
 
-2. **The 5-6 fixture sample is small. Why should these patterns generalize?**
+2. **The 6-fixture sample is small. Why should these patterns generalize?**
 
    The comparison is not a benchmark of catch rate; it is evidence that AA and an AI advisor catch semantically *different kinds* of misconfiguration on the same input. A production decision would require a much larger fixture set drawn from real customer policies, ideally including the policies AA already flags and a stratified sample of the ones it does not. The patterns reported here are *categories* of finding (semantic mismatch, public-principal, hygiene), not catch-rate claims.
 
@@ -164,9 +164,9 @@ Each of these is an example of the right product pattern: AWS encoded a previous
 
 ### E. Cost summary
 
-*Final cost from AWS Cost Explorer to be inserted before submission.*
+> ⚠️ **DRAFT — INSERT BEFORE SUBMISSION.** Replace this entire section with the output of the query below, or delete this section if the number is not yet available. Do not submit with placeholder.
 
-The project was sized against a zero-spend budget alarm at $10. Expected services with non-zero spend: Bedrock (across 6 fixture reviews and dev iterations), KMS (key creation, annual rotation amortized, per-call charges), CloudFront, DynamoDB, Lambda, API Gateway, and data transfer. Query:
+The project was sized against a low-spend budget alarm at $10. Expected services with non-zero spend: Bedrock (across 6 fixture reviews and dev iterations), KMS (key creation, annual rotation amortized, per-call charges), CloudFront, DynamoDB, Lambda, API Gateway, and data transfer.
 
 ```
 aws ce get-cost-and-usage \
@@ -177,8 +177,6 @@ aws ce get-cost-and-usage \
   --profile personal-admin
 ```
 
-Numbers inserted at submission.
-
 ### F. Prior-art reference
 
-Team Vault is the AWS-native re-implementation of a credential-sharing feature in a prior small-business team platform I worked on. The earlier implementation used a single self-managed AES-256-GCM key held in a process environment variable, with ciphertext stored in Postgres and a custom application-level access log. The contrast between that stack and the AWS-native primitives used here (KMS-managed envelope encryption, CloudTrail-captured key use, DynamoDB-backed audit, IAM-scoped access via Cognito groups) sharpened several of the friction observations above — particularly Top 10 entry #2 (KMS double grant), #6 (`cfn-exec-role` overprovisioning), and the AI advisor experiment.
+Team Vault was informed by prior product experience with the same customer problem at a different company. That product addressed credential sharing for small-business teams using a self-managed AES-256-GCM key held in a process environment variable, with ciphertext stored in Postgres and a custom application-level access log. The contrast between that stack and the AWS-native primitives chosen here (KMS-managed envelope encryption, CloudTrail-captured key use, DynamoDB-backed audit, IAM-scoped access via Cognito groups) sharpened several of the friction observations above — particularly Top 10 entry #2 (KMS double grant), #6 (`cfn-exec-role` overprovisioning), and the AI advisor experiment.
