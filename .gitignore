@@ -23,6 +23,7 @@ build/
 *.key
 credentials.json
 aws-exports.js
+.demo-credentials.local.md
 
 # Editor / IDE
 .vscode/

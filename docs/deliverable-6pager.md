@@ -6,7 +6,7 @@
 
 I built **Team Vault**, a single-tenant internal credential manager for a small B2B SaaS team that already runs on AWS and has a customer or compliance reason to keep sensitive operational credentials in its own account. The app is intentionally a normal customer build, not an identity-only exercise: a React SPA on S3 + CloudFront, Cognito Hosted UI auth, API Gateway with a Cognito authorizer, Lambda handlers, DynamoDB storage and audit, KMS envelope encryption, CDK infrastructure, and a Bedrock-backed policy advisor.
 
-Across 8 days of building, I logged **32 IAM-adjacent friction moments**. The pattern was consistent: the hardest parts were not missing features, but hidden state, hidden defaults, split responsibility across services, and errors that do not name the failing layer. The highest-impact finding: IAM Access Analyzer's synchronous `validate-policy` did not flag a public-principal trust policy (`Principal: "*"`) even with the correct trust-policy resource-type hint. A small Bedrock-backed advisor caught that and 3 other patterns Access Analyzer missed on the same 5 test policies, at about **$0.06 per review**.
+Across 8 days of building, I logged **32 IAM-adjacent friction moments**. The pattern was consistent: the hardest parts were not missing features, but hidden state, hidden defaults, split responsibility across services, and errors that do not name the failing layer. The highest-impact finding: IAM Access Analyzer has a specialized `check-no-public-access` API that catches a public-principal trust policy (`Principal: "*"`), but the synchronous `validate-policy` path did not route me there even with the trust-policy resource-type hint. A small Bedrock-backed advisor caught the public-principal issue at the same "pre-deploy review" moment and also surfaced 3 other semantic patterns from the same fixture set, at about **$0.06 per review**.
 
 - Live demo: <https://d27nvg04sp0g9m.cloudfront.net>
 - Code: <https://github.com/cheers-nl/iam>
@@ -38,7 +38,7 @@ The customer problem is grounded in prior product experience with small-business
 
 | Rank | Observation | Why it matters | Product suggestion |
 |---:|---|---|---|
-| 1 | `validate-policy` did not flag `Principal: "*"` in a trust policy. | The synchronous pre-deploy checker missed a high-impact public-principal pattern; the separate external-access analyzer catches a different moment in the lifecycle. | Add a `SECURITY_WARNING` for public principals without conditions, or explicitly tell users this requires external-access analysis. |
+| 1 | `validate-policy` did not route a `Principal: "*"` trust policy to `check-no-public-access`. | AWS has the detection capability, but it lives in a separate command/API; the newcomer path gives a clean result at the exact pre-deploy moment when a warning would help. | In `validate-policy`, either fan out to the specialized public-access check when the resource type is known, or return a next-step hint that names `check-no-public-access` / external-access analysis. |
 | 2 | KMS access is a hidden two-policy contract. | Docs say key policy and identity policy both matter, but the default root statement silently enables IAM delegation; removing it breaks otherwise valid IAM grants. | In the KMS console/CDK output, label the root statement as "enables IAM policy delegation" instead of looking like accidental over-permission. |
 | 3 | API Gateway CORS has three independent surfaces. | Preflight, Lambda responses, and gateway-generated 401/403s each need headers; all failures collapse into browser "Failed to fetch." | Offer one higher-level CORS contract for Cognito-protected APIs, or error messages that name the missing surface. |
 | 4 | DynamoDB `LeadingKeys` is structurally hard to use behind Lambda. | The common browser -> API Gateway -> Lambda pattern has one execution role, so per-user IAM row scoping requires STS session tags and role assumption. | Provide a first-class Lambda + DynamoDB scoped-access pattern in CDK or serverless docs. |
@@ -51,17 +51,18 @@ The customer problem is grounded in prior product experience with small-business
 
 ## AI Policy Advisor Experiment
 
-I tested whether an LLM could catch IAM issues that static validation misses. I ran the same 5 policy fixtures through IAM Access Analyzer `validate-policy` and a Bedrock-backed Lambda using Claude Opus 4.6.
+I tested whether an LLM could catch IAM issues that static validation misses or routes to a separate tool. I ran 6 policy fixtures through IAM Access Analyzer `validate-policy`, one applicable specialized AA check, and a Bedrock-backed Lambda using Claude Opus 4.6.
 
-| Policy | AA findings | AI findings | Net result |
+| Policy | AA result | AI findings | Net result |
 |---|---:|---:|---|
 | Real Lambda execution policy | 0 | 3 | AI flagged overprovisioning/hygiene patterns. |
 | Full admin `*:*` on `*` | 2 | 4 | AI caught AA's concern plus broader privilege-escalation context. |
-| Public trust policy `Principal: "*"` | 0 | 3 | AI caught the headline public-principal risk. |
+| Public trust policy `Principal: "*"` | `validate-policy`: 0; `check-no-public-access`: FAIL | 3 | AA has the capability, but not in the first tool path; AI caught it in-line. |
 | `s3:GetObject` on IAM role ARN | 0 | 2 | AI caught action/resource semantic mismatch. |
 | `kms:*` on `*` | 0 | 5 | AI caught service-specific KMS escalation paths. |
+| Prompt-injection Sid + full admin | 2 | 4 | AI still flagged the dangerous policy and called out the suspicious Sid. |
 
-This is not a replacement story. Access Analyzer is deterministic, fast, free, and strong at structural validation and known dangerous patterns such as `iam:PassRole` wildcards. The AI advisor is useful as a second pass for semantic review: slower, non-deterministic, and not security-blessed, but able to explain why a pattern matters in language a newcomer can act on. The raw inputs and outputs are in [`docs/evidence`](evidence/README.md).
+This is not a replacement story. Access Analyzer is deterministic, fast, free, and strong at structural validation, known dangerous patterns such as `iam:PassRole` wildcards, and specialized checks like public-access detection. The product gap I observed is tool-surface integration: users have to know which AA capability answers which question. The AI advisor is useful as a second pass for semantic review: slower, non-deterministic, and not security-blessed, but able to explain why a pattern matters in language a newcomer can act on. The raw inputs and outputs are in [`docs/evidence`](evidence/README.md).
 
 ## Product Opportunities
 

@@ -140,10 +140,45 @@ describe('TeamVaultLite stack', () => {
     });
   });
 
+  test('CORS preflight allows DELETE for the admin delete flow', () => {
+    const t = Template.fromStack(makeStack());
+    const methods = t.findResources('AWS::ApiGateway::Method');
+    const optionMethods = Object.values(methods).filter(
+      (resource) => (resource as any).Properties.HttpMethod === 'OPTIONS'
+    );
+
+    expect(optionMethods.length).toBeGreaterThan(0);
+    expect(JSON.stringify(optionMethods)).toContain('GET,POST,DELETE,OPTIONS');
+  });
+
   test('KMS customer-managed key has rotation enabled', () => {
     const t = Template.fromStack(makeStack());
     t.hasResourceProperties('AWS::KMS::Key', {
       EnableKeyRotation: true,
+    });
+  });
+
+  test('DynamoDB table uses the customer-managed KMS key', () => {
+    const t = Template.fromStack(makeStack());
+    t.hasResourceProperties('AWS::DynamoDB::Table', {
+      SSESpecification: Match.objectLike({
+        SSEEnabled: true,
+        SSEType: 'KMS',
+      }),
+    });
+  });
+
+  test('CloudFront sends baseline browser security headers', () => {
+    const t = Template.fromStack(makeStack());
+    t.hasResourceProperties('AWS::CloudFront::ResponseHeadersPolicy', {
+      ResponseHeadersPolicyConfig: Match.objectLike({
+        SecurityHeadersConfig: Match.objectLike({
+          ContentSecurityPolicy: Match.objectLike({ Override: true }),
+          ContentTypeOptions: Match.objectLike({ Override: true }),
+          FrameOptions: Match.objectLike({ FrameOption: 'DENY', Override: true }),
+          StrictTransportSecurity: Match.objectLike({ Override: true }),
+        }),
+      }),
     });
   });
 

@@ -28,6 +28,9 @@ const KMS_KEY_ID = process.env.KMS_KEY_ID!;
 const USER_POOL_ID = process.env.USER_POOL_ID!;
 const ADMIN_GROUP = 'vault-admin';
 const MEMBER_GROUP = 'vault-member';
+const MAX_SECRET_BYTES = 4096;
+const MAX_TITLE_BYTES = 160;
+const MAX_NOTES_BYTES = 2048;
 
 // CORS allowlist — tighter than wildcard. CDK owns the deployed CloudFront
 // domain and passes it here so this handler does not drift if the distribution
@@ -49,7 +52,7 @@ const skForSecret = (id: string) => `SECRET#${id}`;
 const skForAudit = (timestamp: string, eventId: string) =>
   `AUDIT#${timestamp}#${eventId}`;
 
-function pickAllowedOrigin(event: APIGatewayProxyEvent): string {
+export function pickAllowedOrigin(event: APIGatewayProxyEvent): string {
   const headers = event.headers ?? {};
   const origin = (headers['origin'] ?? headers['Origin'] ?? '') as string;
   return ALLOWED_ORIGINS.includes(origin) ? origin : DEFAULT_ALLOWED_ORIGIN;
@@ -115,6 +118,26 @@ type EncryptedPayload = {
 };
 
 type AuditAction = 'CREATE' | 'REVEAL' | 'DELETE' | 'INVITE';
+
+function parseJsonBody(event: APIGatewayProxyEvent): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(event.body ?? '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    throw new Error('request body must be valid JSON');
+  }
+}
+
+function optionalString(value: unknown, maxBytes: number, fieldName: string): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') {
+    throw new Error(`${fieldName} must be a string`);
+  }
+  if (Buffer.byteLength(value, 'utf8') > maxBytes) {
+    throw new Error(`${fieldName} must be ${maxBytes} bytes or less`);
+  }
+  return value;
+}
 
 async function encryptValue(plaintext: string): Promise<EncryptedPayload> {
   const dataKeyResp = await kms.send(
@@ -243,7 +266,7 @@ async function whoAmI(claims: Claims, origin: string): Promise<APIGatewayProxyRe
   );
 }
 
-async function createSecret(
+export async function createSecret(
   claims: Claims,
   event: APIGatewayProxyEvent,
   origin: string
@@ -252,10 +275,39 @@ async function createSecret(
     return json(403, { error: 'admin role required to create secrets' }, origin);
   }
 
-  const body = JSON.parse(event.body ?? '{}');
+  let body: Record<string, unknown>;
+  try {
+    body = parseJsonBody(event);
+  } catch (err: any) {
+    return json(400, { error: err.message }, origin);
+  }
+
   const { title, loginUrl, usernameHint, password, category, notes } = body;
-  if (!title || !password) {
-    return json(400, { error: 'title and password are required' }, origin);
+  if (typeof title !== 'string' || !title.trim() || typeof password !== 'string' || !password) {
+    return json(400, { error: 'title and password are required strings' }, origin);
+  }
+  if (Buffer.byteLength(title, 'utf8') > MAX_TITLE_BYTES) {
+    return json(400, { error: `title must be ${MAX_TITLE_BYTES} bytes or less` }, origin);
+  }
+  if (Buffer.byteLength(password, 'utf8') > MAX_SECRET_BYTES) {
+    return json(400, { error: `password must be ${MAX_SECRET_BYTES} bytes or less` }, origin);
+  }
+
+  let cleanLoginUrl: string | null;
+  let cleanUsernameHint: string | null;
+  let cleanNotes: string | null;
+  try {
+    cleanLoginUrl = optionalString(loginUrl, 512, 'loginUrl');
+    cleanUsernameHint = optionalString(usernameHint, 256, 'usernameHint');
+    cleanNotes = optionalString(notes, MAX_NOTES_BYTES, 'notes');
+  } catch (err: any) {
+    return json(400, { error: err.message }, origin);
+  }
+  const cleanCategory = typeof category === 'string' && category ? category : 'GENERAL';
+  const cleanTitle = title.trim();
+
+  if (Buffer.byteLength(cleanCategory, 'utf8') > 64) {
+    return json(400, { error: 'category must be 64 bytes or less' }, origin);
   }
 
   const secretId = randomUUID();
@@ -269,11 +321,11 @@ async function createSecret(
         pk: TEAM_PK,
         sk: skForSecret(secretId),
         secretId,
-        title,
-        loginUrl: loginUrl ?? null,
-        usernameHint: usernameHint ?? null,
-        category: category ?? 'GENERAL',
-        notes: notes ?? null,
+        title: cleanTitle,
+        loginUrl: cleanLoginUrl,
+        usernameHint: cleanUsernameHint,
+        category: cleanCategory,
+        notes: cleanNotes,
         ciphertext: encrypted.ciphertext,
         iv: encrypted.iv,
         authTag: encrypted.authTag,
@@ -284,12 +336,12 @@ async function createSecret(
     })
   );
 
-  await writeAudit('CREATE', secretId, title, claims.sub!, claims.email);
+  await writeAudit('CREATE', secretId, cleanTitle, claims.sub!, claims.email);
 
-  return json(201, { id: secretId, title, createdAt: now }, origin);
+  return json(201, { id: secretId, title: cleanTitle, createdAt: now }, origin);
 }
 
-async function listSecrets(claims: Claims, origin: string): Promise<APIGatewayProxyResult> {
+export async function listSecrets(claims: Claims, origin: string): Promise<APIGatewayProxyResult> {
   if (!isMemberOrAdmin(claims)) {
     return json(403, { error: 'vault membership required' }, origin);
   }
@@ -317,7 +369,7 @@ async function listSecrets(claims: Claims, origin: string): Promise<APIGatewayPr
   return json(200, { secrets: items }, origin);
 }
 
-async function getSecret(
+export async function getSecret(
   claims: Claims,
   secretId: string | undefined,
   origin: string
@@ -371,7 +423,7 @@ async function getSecret(
   );
 }
 
-async function deleteSecret(
+export async function deleteSecret(
   claims: Claims,
   secretId: string | undefined,
   origin: string
@@ -404,7 +456,7 @@ async function deleteSecret(
   return json(200, { id: secretId, deleted: true }, origin);
 }
 
-async function listAudit(claims: Claims, origin: string): Promise<APIGatewayProxyResult> {
+export async function listAudit(claims: Claims, origin: string): Promise<APIGatewayProxyResult> {
   if (!isAdmin(claims)) {
     return json(403, { error: 'admin role required to view audit log' }, origin);
   }
@@ -435,7 +487,7 @@ async function listAudit(claims: Claims, origin: string): Promise<APIGatewayProx
   return json(200, { events }, origin);
 }
 
-async function listMembers(claims: Claims, origin: string): Promise<APIGatewayProxyResult> {
+export async function listMembers(claims: Claims, origin: string): Promise<APIGatewayProxyResult> {
   if (!isAdmin(claims)) {
     return json(403, { error: 'admin role required to list members' }, origin);
   }
@@ -461,7 +513,7 @@ async function listMembers(claims: Claims, origin: string): Promise<APIGatewayPr
   return json(200, { members: all }, origin);
 }
 
-async function inviteMember(
+export async function inviteMember(
   claims: Claims,
   event: APIGatewayProxyEvent,
   origin: string
@@ -470,9 +522,15 @@ async function inviteMember(
     return json(403, { error: 'admin role required to invite members' }, origin);
   }
 
-  const body = JSON.parse(event.body ?? '{}');
+  let body: Record<string, unknown>;
+  try {
+    body = parseJsonBody(event);
+  } catch (err: any) {
+    return json(400, { error: err.message }, origin);
+  }
+
   const { email, role } = body;
-  if (!email || !role) {
+  if (typeof email !== 'string' || !email.trim() || typeof role !== 'string') {
     return json(400, { error: 'email and role required' }, origin);
   }
   if (role !== 'admin' && role !== 'member') {
@@ -480,35 +538,43 @@ async function inviteMember(
   }
 
   const groupName = role === 'admin' ? ADMIN_GROUP : MEMBER_GROUP;
+  const normalizedEmail = email.trim().toLowerCase();
 
-  await cognito.send(
-    new AdminCreateUserCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: email,
-      UserAttributes: [
-        { Name: 'email', Value: email },
-        { Name: 'email_verified', Value: 'true' },
-      ],
-      DesiredDeliveryMediums: ['EMAIL'],
-    })
-  );
+  try {
+    await cognito.send(
+      new AdminCreateUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: normalizedEmail,
+        UserAttributes: [
+          { Name: 'email', Value: normalizedEmail },
+          { Name: 'email_verified', Value: 'true' },
+        ],
+        DesiredDeliveryMediums: ['EMAIL'],
+      })
+    );
+  } catch (err: any) {
+    if (err?.name === 'UsernameExistsException') {
+      return json(409, { error: 'user already exists', email: normalizedEmail }, origin);
+    }
+    throw err;
+  }
 
   await cognito.send(
     new AdminAddUserToGroupCommand({
       UserPoolId: USER_POOL_ID,
-      Username: email,
+      Username: normalizedEmail,
       GroupName: groupName,
     })
   );
 
   await writeAudit(
     'INVITE',
-    email,
-    `Invited ${email} as ${role}`,
+    normalizedEmail,
+    `Invited ${normalizedEmail} as ${role}`,
     claims.sub!,
     claims.email,
-    { invitedEmail: email, invitedRole: role }
+    { invitedEmail: normalizedEmail, invitedRole: role }
   );
 
-  return json(201, { email, role, status: 'invited' }, origin);
+  return json(201, { email: normalizedEmail, role, status: 'invited' }, origin);
 }

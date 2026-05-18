@@ -16,6 +16,9 @@ export class TeamVaultLiteStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    cdk.Tags.of(this).add('Project', 'team-vault-lite');
+    cdk.Tags.of(this).add('Purpose', 'iam-onboarding-day1');
+
     // ---------- S3 + CloudFront for the web UI (new in D6) ----------
     // Private S3 bucket — no public access, served only via CloudFront OAC.
     const webBucket = new s3.Bucket(this, 'WebBucket', {
@@ -26,6 +29,38 @@ export class TeamVaultLiteStack extends cdk.Stack {
       autoDeleteObjects: true,
     });
 
+    const responseHeadersPolicy = new cloudfront.ResponseHeadersPolicy(this, 'WebSecurityHeaders', {
+      responseHeadersPolicyName: 'team-vault-lite-security-headers',
+      securityHeadersBehavior: {
+        contentSecurityPolicy: {
+          contentSecurityPolicy: [
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self'",
+            "img-src 'self' data:",
+            "connect-src 'self' https://*.execute-api.us-west-2.amazonaws.com https://*.amazoncognito.com",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+            "form-action 'self' https://*.amazoncognito.com",
+            "object-src 'none'",
+          ].join('; '),
+          override: true,
+        },
+        contentTypeOptions: { override: true },
+        frameOptions: { frameOption: cloudfront.HeadersFrameOption.DENY, override: true },
+        referrerPolicy: {
+          referrerPolicy: cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+          override: true,
+        },
+        strictTransportSecurity: {
+          accessControlMaxAge: cdk.Duration.days(365),
+          includeSubdomains: true,
+          preload: true,
+          override: true,
+        },
+      },
+    });
+
     // CloudFront distribution with Origin Access Control (modern replacement
     // for the deprecated Origin Access Identity).
     const distribution = new cloudfront.Distribution(this, 'WebDistribution', {
@@ -34,6 +69,7 @@ export class TeamVaultLiteStack extends cdk.Stack {
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
         allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        responseHeadersPolicy,
       },
       defaultRootObject: 'index.html',
       // SPA fallback: 403/404 from S3 (route not present) -> serve index.html
@@ -118,20 +154,22 @@ export class TeamVaultLiteStack extends cdk.Stack {
       description: 'Vault members — list and reveal secrets only.',
     });
 
+    // ---------- KMS ----------
+    const vaultKey = new kms.Key(this, 'VaultKey', {
+      alias: 'team-vault-lite/dek',
+      description: 'Master key for Team Vault Lite envelope encryption',
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     // ---------- DynamoDB ----------
     const vaultTable = new dynamodb.Table(this, 'VaultTable', {
       tableName: 'team-vault-lite',
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-    });
-
-    // ---------- KMS ----------
-    const vaultKey = new kms.Key(this, 'VaultKey', {
-      alias: 'team-vault-lite/dek',
-      description: 'Master key for Team Vault Lite envelope encryption',
-      enableKeyRotation: true,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: vaultKey,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
@@ -205,7 +243,7 @@ export class TeamVaultLiteStack extends cdk.Stack {
       // Cognito authorizer is NOT attached to OPTIONS (CDK handles this).
       defaultCorsPreflightOptions: {
         allowOrigins: [cloudFrontUrl, 'http://localhost:5173'],
-        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
         allowHeaders: ['Authorization', 'Content-Type'],
         maxAge: cdk.Duration.minutes(10),
       },

@@ -1,0 +1,10 @@
+{
+    "result": "FAIL",
+    "message": "The resource policy grants public access for the given resource type.",
+    "reasons": [
+        {
+            "description": "Public access granted in the following statement with index: 0.",
+            "statementIndex": 0
+        }
+    ]
+}

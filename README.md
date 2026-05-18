@@ -8,14 +8,14 @@ In development as the build artifact for a Day 1 onboarding deliverable. See [do
 
 ## What it is
 
-A single-tenant shared team vault. Admins (`vault-admin` Cognito group) create, delete, and reveal secrets, view the activity log, and invite teammates. Members (`vault-member` group) can list and reveal secrets but cannot create, delete, or invite. Self-signup is disabled; membership is invite-only via `AdminCreateUser` + `AdminAddUserToGroup`. Every secret is encrypted at rest with envelope encryption (KMS-issued data key, AES-256-GCM in Lambda, encrypted data key stored alongside ciphertext in DynamoDB). Every `CREATE` / `REVEAL` / `DELETE` / `INVITE` is logged to a DynamoDB audit table; underneath, every KMS call is also captured automatically by CloudTrail.
+A single-tenant shared team vault. Admins (`vault-admin` Cognito group) create, delete, and reveal secrets, view the activity log, and invite teammates. Members (`vault-member` group) can list and reveal secrets but cannot create, delete, or invite. Self-signup is disabled; membership is invite-only via `AdminCreateUser` + `AdminAddUserToGroup`. The SPA uses Cognito Hosted UI authorization-code flow with PKCE. Every secret is encrypted at rest with envelope encryption (KMS-issued data key, AES-256-GCM in Lambda, encrypted data key stored alongside ciphertext in DynamoDB), and the DynamoDB table itself is encrypted with the same customer-managed KMS key. Every `CREATE` / `REVEAL` / `DELETE` / `INVITE` is logged to DynamoDB; underneath, every KMS call is also captured automatically by CloudTrail.
 
 ## Stack
 
 - **Infrastructure:** AWS CDK (TypeScript)
 - **Compute:** AWS Lambda + Amazon API Gateway (REST with Cognito User Pool authorizer)
-- **Auth:** Amazon Cognito user pool + Hosted UI; role gating via `cognito:groups`
-- **Storage:** Amazon DynamoDB (single-table design)
+- **Auth:** Amazon Cognito user pool + Hosted UI with PKCE; role gating via `cognito:groups`
+- **Storage:** Amazon DynamoDB (single-table design, customer-managed KMS encryption)
 - **Encryption:** AWS KMS customer-managed key (envelope encryption)
 - **Frontend:** React + Vite, hosted on Amazon S3 + Amazon CloudFront (Origin Access Control)
 - **Policy review experiment:** Bedrock-backed Lambda (Claude Opus 4.6 via `us.anthropic.claude-opus-4-6-v1` inference profile)
@@ -30,6 +30,7 @@ app/          Lambda handler sources
   policy-advisor/    The AI policy advisor experiment (Lambda Function)
 frontend/     Vite + React SPA
 docs/         Deliverable, planning, evidence appendix
+scripts/      Demo smoke test, audit trail helper, demo-data seeder
 pain-log.md   Friction observations captured during the build (32 entries)
 ```
 

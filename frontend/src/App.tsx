@@ -6,6 +6,8 @@ const HOSTED_UI_BASE = import.meta.env.VITE_HOSTED_UI_BASE as string;
 const CALLBACK_URL = import.meta.env.VITE_CALLBACK_URL as string;
 
 const TOKEN_KEY = 'tvl_tokens';
+const PKCE_VERIFIER_KEY = 'tvl_pkce_verifier';
+const OAUTH_STATE_KEY = 'tvl_oauth_state';
 
 type Tokens = {
   id_token: string;
@@ -84,15 +86,42 @@ function rolesFromToken(token: string | undefined): { isAdmin: boolean; hasVault
   }
 }
 
-function loginUrl(): string {
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = '';
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function randomBase64Url(byteLength = 32): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return base64UrlEncode(bytes);
+}
+
+async function sha256Base64Url(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return base64UrlEncode(new Uint8Array(digest));
+}
+
+async function startLogin(): Promise<void> {
+  const verifier = randomBase64Url(64);
+  const state = randomBase64Url(32);
+  const challenge = await sha256Base64Url(verifier);
+  sessionStorage.setItem(PKCE_VERIFIER_KEY, verifier);
+  sessionStorage.setItem(OAUTH_STATE_KEY, state);
+
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
     response_type: 'code',
     scope: 'openid email profile',
     redirect_uri: CALLBACK_URL,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    state,
   });
-  return `${HOSTED_UI_BASE}/oauth2/authorize?${params}`;
+  window.location.href = `${HOSTED_UI_BASE}/oauth2/authorize?${params}`;
 }
+
 function logoutUrl(): string {
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
@@ -100,12 +129,13 @@ function logoutUrl(): string {
   });
   return `${HOSTED_UI_BASE}/logout?${params}`;
 }
-async function exchangeCodeForTokens(code: string): Promise<Tokens> {
+async function exchangeCodeForTokens(code: string, verifier: string): Promise<Tokens> {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     client_id: CLIENT_ID,
     code,
     redirect_uri: CALLBACK_URL,
+    code_verifier: verifier,
   });
   const resp = await fetch(`${HOSTED_UI_BASE}/oauth2/token`, {
     method: 'POST',
@@ -136,13 +166,28 @@ async function apiFetch(path: string, init: RequestInit = {}): Promise<Response>
 // ------------- Components -------------
 
 function LoginPage() {
+  const [signingIn, setSigningIn] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function handleLogin() {
+    setSigningIn(true);
+    setErr(null);
+    try {
+      await startLogin();
+    } catch (e: any) {
+      setErr(e.message ?? String(e));
+      setSigningIn(false);
+    }
+  }
+
   return (
     <div className="container login-page">
       <h1>Team Vault</h1>
       <p>Self-hosted team password vault on your own AWS infrastructure.</p>
-      <a href={loginUrl()}>
-        <button className="primary">Sign in with Cognito</button>
-      </a>
+      {err && <div className="error">{err}</div>}
+      <button className="primary" onClick={handleLogin} disabled={signingIn}>
+        {signingIn ? 'Redirecting...' : 'Sign in with Cognito'}
+      </button>
     </div>
   );
 }
@@ -150,13 +195,34 @@ function LoginPage() {
 function CallbackPage({ onComplete }: { onComplete: () => void }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    const code = new URLSearchParams(window.location.search).get('code');
+    const params = new URLSearchParams(window.location.search);
+    const oauthError = params.get('error');
+    if (oauthError) {
+      setError(params.get('error_description') ?? oauthError);
+      return;
+    }
+
+    const code = params.get('code');
+    const state = params.get('state');
+    const expectedState = sessionStorage.getItem(OAUTH_STATE_KEY);
+    const verifier = sessionStorage.getItem(PKCE_VERIFIER_KEY);
     if (!code) {
       setError('No code in callback URL');
       return;
     }
-    exchangeCodeForTokens(code)
+    if (!state || state !== expectedState) {
+      setError('OAuth state mismatch');
+      return;
+    }
+    if (!verifier) {
+      setError('Missing PKCE verifier');
+      return;
+    }
+
+    exchangeCodeForTokens(code, verifier)
       .then((tokens) => {
+        sessionStorage.removeItem(PKCE_VERIFIER_KEY);
+        sessionStorage.removeItem(OAUTH_STATE_KEY);
         saveTokens(tokens);
         window.history.replaceState({}, '', '/');
         onComplete();

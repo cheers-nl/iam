@@ -126,24 +126,25 @@ Copy this block for each new entry:
 - **Service(s)**: AWS CDK + IAM + CloudFormation
 - **Severity**: medium-high — invisible IAM is the worst IAM. Every CDK user passes through this step; no one is warned.
 
-### 2026-05-14 — Built an AI policy advisor on Bedrock; it caught 4 of 5 patterns that AA validate-policy missed, at ~$0.06 per policy review
+### 2026-05-14 — Built an AI policy advisor on Bedrock; it exposed AA tool-surface gaps at ~$0.06 per policy review
 
-- **What I was trying to do**: Test the thesis that AI-assisted policy review is a high-leverage complement to AA's static `validate-policy`. Built a Bedrock-backed Lambda (Claude Opus 4.6) that takes a policy JSON, returns structured findings. Ran the same 5 test policies from D7 through both AA and the AI advisor, side by side.
+- **What I was trying to do**: Test the thesis that AI-assisted policy review is a high-leverage complement to AA's static `validate-policy` and specialized checks. Built a Bedrock-backed Lambda (Claude Opus 4.6) that takes a policy JSON, returns structured findings. Ran the policy fixtures through AA and the AI advisor, side by side.
 - **Empirical results** (full data in `docs/ai-vs-aa-comparison.md`):
   | Test case | AA findings | AI findings | AI catches gap? |
   |---|---|---|---|
   | Our actual Lambda policy (we know it's overprovisioned) | 0 | 3 | ✅ flagged Scan + BatchWriteItem + KMS wildcards |
   | Full admin `*:*` on `*` | 2 (PassRole/SLR specific) | 4 (full pattern + privilege escalation) | ✅ broader coverage |
-  | **`Principal: "*"` trust policy (public-principal anti-pattern)** | **0** | **3 (public-principal HIGH + missing-condition HIGH)** | ✅ **caught the public-principal issue** |
+  | **`Principal: "*"` trust policy (public-principal anti-pattern)** | **validate-policy: 0; check-no-public-access: FAIL** | **3 (public-principal HIGH + missing-condition HIGH)** | ✅ **caught the issue in the first-pass review path** |
   | `s3:GetObject` on IAM role ARN (action/resource mismatch) | 0 | 2 (explained "will never take effect") | ✅ semantic reasoning |
   | `kms:*` on `*` | 0 | 5 (incl. `kms:PutKeyPolicy` escalation explained) | ✅ service-specific knowledge |
-  
-  **Total cost: ~$0.30 for all 5 reviews**. Per-policy cost ~$0.05–$0.07. Latency ~5–10s per review. False-positive rate: low but non-zero (AI occasionally suggested narrowing legitimate idiomatic wildcards like KMS `GenerateDataKey*`).
-  
-  **This is direct evidence for the thesis stated in pain log entry #24** ("validate-policy MISSES `Principal:*`"). AA didn't catch the public-principal issue; AI did, at first invocation. AI also explained *why* each finding matters in plain language a newcomer can act on. AA's findings come as opaque issue codes (`PASS_ROLE_WITH_STAR_IN_ACTION_AND_RESOURCE`) — readable to experts, but doesn't transfer knowledge to newcomers.
+  | Prompt-injection Sid + full admin | 2 | 4 (incl. suspicious Sid) | ✅ ignored the embedded instruction |
+
+  **Total cost: ~$0.35 for all 6 reviews**. Per-policy cost ~$0.05–$0.07. Latency ~5–10s per review. False-positive rate: low but non-zero (AI occasionally suggested narrowing legitimate idiomatic wildcards like KMS `GenerateDataKey*`).
+
+  **Updated D8 interpretation**: AA does catch the public-principal issue through `check-no-public-access`; the friction is that `validate-policy` returns no findings and does not direct the user to that specialized API. AI did catch it at first invocation and explained *why* each finding matters in plain language a newcomer can act on. AA's findings come as opaque issue codes (`PASS_ROLE_WITH_STAR_IN_ACTION_AND_RESOURCE`) — readable to experts, but they do not transfer much context to newcomers.
 - **What this suggests**:
-  - AI-assisted policy review is **complementary** to AA, not a replacement. AA = fast structural check; AI = deeper semantic review for policies above a threshold of complexity or risk.
-  - A productized "IAM Policy Advisor" run on every `cdk diff` output, gated to policies AA marked "no findings", would cost negligibly and surface the high-impact gaps AA misses.
+  - AI-assisted policy review is **complementary** to AA, not a replacement. AA = fast deterministic checks plus specialized analyzers; AI = deeper semantic review and explanation for policies above a threshold of complexity or risk.
+  - A productized "IAM Policy Advisor" run on `cdk diff` output could first route to the right AA surface, then use AI to explain or catch semantic gaps.
   - This is **direct support for the team's OP1 simplification mandate** — the AI advisor does precisely "the hard thinking on the customer's behalf" that Kai's framing calls for.
 - **What was hard about building it**: 4-layer Bedrock access gating (covered in the preceding entries); inference-profile IAM ARN coverage across multiple regions; first-call-grace-period vs subsequent-call-blocking inconsistency. Once access was sorted, the actual Lambda code was ~120 lines.
 - **Category**: AI / Permissions / Product strategy
@@ -294,16 +295,16 @@ Copy this block for each new entry:
 - **Service(s)**: AWS IAM Access Analyzer
 - **Severity**: medium — wastes time for anyone validating a trust policy for the first time.
 
-### 2026-05-14 — AA validate-policy MISSES `Principal: "*"` in trust policies — high-impact public-principal mistake passes the analyzer
+### 2026-05-14 — AA validate-policy does not route `Principal: "*"` trust policies to the public-access check
 
 - **What I was trying to do**: With the correct `--validate-policy-resource-type AWS::IAM::AssumeRolePolicyDocument` flag set, validate a trust policy that allows ANY AWS principal (`Principal: {"AWS": "*"}`) to assume the role — no Condition.
-- **Friction**: AA's validate-policy returned **zero findings**. Public assumability with no Condition is one of the highest-impact IAM trust-policy mistakes, but it passes AA's static validator clean. The presumed reason: AA expects this kind of risk to be caught by its *external-access analyzer* (the continuous one) when the policy is actually attached to a resource. But validate-policy is positioned in tooling and docs as "the synchronous policy check you run before deploying" — exactly the moment when you'd want to be warned about a Principal-star trust policy *before* it reaches AWS. The two AA tools have non-overlapping coverage of the most important IAM mistake, and validate-policy is the one users reach for first.
+- **Friction**: AA's validate-policy returned **zero findings**. A later D8 verification showed that AA's separate `check-no-public-access` API correctly returns **FAIL** for the same policy, so the capability exists. The issue is workflow integration: `validate-policy` is positioned in tooling and docs as "the synchronous policy check you run before deploying," but it does not route a known trust-policy shape to the adjacent public-access check or tell the user to run it.
 - **What would have been easier**:
-  - validate-policy should treat `Principal: "*"` (or `Principal: {"AWS": "*"}`) without a Condition as at least a SECURITY_WARNING — even if the external-access analyzer also flags it later. Static catching beats runtime catching for a deploy-time guard.
-  - Or, doc the gap explicitly: *"validate-policy does not flag overly broad principals; for that, attach the policy to a resource and the external-access analyzer will detect it."*
+  - `validate-policy` could fan out to `check-no-public-access` when `--validate-policy-resource-type AWS::IAM::AssumeRolePolicyDocument` is present.
+  - Or, return a next-step hint: *"Static validation passed. To check whether this resource policy grants public access, run accessanalyzer check-no-public-access."*
 - **Category**: Permissions / Docs
 - **Service(s)**: AWS IAM Access Analyzer
-- **Severity**: **high** — this is a high-impact trust-policy mistake and AA's most-reached-for tool doesn't catch it. The IAM team should care about this.
+- **Severity**: **high** — this is a high-impact trust-policy mistake and AA's most-reached-for tool does not guide users to the AA capability that catches it.
 
 ### 2026-05-14 — AA unused-access analyzer is fast and effective, and independently validates the CDK bootstrap overprovisioning observation from D2
 
