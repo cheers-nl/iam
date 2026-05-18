@@ -6,18 +6,18 @@
 
 AWS IAM friction for newcomers is rarely about missing capabilities. It is about hidden state, hidden defaults, split responsibility across services, and tool surfaces that do not point users to the adjacent capability they need. I learned this by building Team Vault — a single-tenant internal credential manager — over 8 days, and logging 32 IAM-adjacent friction moments along the way.
 
-The highest-impact finding: IAM Access Analyzer has a specialized `check-no-public-access` API that correctly fails a public-principal trust policy (`Principal: "*"`). The synchronous `validate-policy` path — positioned in AWS tooling and docs as the pre-deploy policy check — neither catches the case nor points to the adjacent check, even with the trust-policy resource-type hint. A Bedrock-backed advisor I built caught the same case at the `validate-policy` moment, plus three other semantic patterns on the same fixture set, at about $0.06 per review. AWS has the detection capability; the gap is workflow integration and discoverability.
+The highest-impact finding: IAM Access Analyzer has a specialized `check-no-public-access` API that correctly fails a public-principal trust policy (`Principal: "*"`). The synchronous `validate-policy` path — positioned in AWS tooling and docs as the pre-deploy policy check — neither catches the case nor points to the adjacent check, even with the trust-policy resource-type hint. A Bedrock-backed advisor I built caught the same case at the `validate-policy` moment, plus three other semantic patterns on the same fixture set. AWS has the detection capability; the gap is workflow integration and discoverability.
 
 The build is intentionally a normal customer scenario rather than an identity-only exercise: a React SPA on S3 + CloudFront, Cognito Hosted UI auth with PKCE, API Gateway with a Cognito authorizer, Lambda handlers, DynamoDB storage with audit, KMS envelope encryption, CDK infrastructure, and a Bedrock-backed policy advisor.
 
-- Live demo: <https://d27nvg04sp0g9m.cloudfront.net> *(available through 2026-05-25)*
-- Code: <https://github.com/cheers-nl/iam>
-- Full pain log: [`pain-log.md`](../pain-log.md)
-- Reproducible AI-vs-AA evidence: [`docs/evidence`](evidence/README.md)
+- [Live demo](https://d27nvg04sp0g9m.cloudfront.net) *(available through 2026-05-25)*
+- [Code](https://github.com/cheers-nl/iam)
+- [Full pain log](../pain-log.md) — 32 friction entries (see Appendix B)
+- [AI advisor vs Access Analyzer evidence](evidence/README.md) — raw outputs (see Appendix C)
 
 ## What I Built
 
-**Customer scenario.** A 12-person B2B SaaS team in a compliance-adjacent vertical manages 40+ third-party credentials: Stripe, SendGrid, Datadog, OpenAI, customer-specific tokens, and CI/CD signing keys. Most teams should buy 1Password Business; this build inhabits the smaller segment with contract, sovereignty, or audit requirements that push them to build inside their own AWS account.
+**Customer scenario.** A small B2B SaaS team in a compliance-adjacent vertical manages 40+ third-party credentials: Stripe, SendGrid, Datadog, OpenAI, customer-specific tokens, and CI/CD signing keys. Their largest customer contract bars storing payment-flow credentials in third-party SaaS, which pushes them to build their team vault inside their own AWS account.
 
 **Product.** Team Vault lets admins create, reveal, delete, audit, and invite members. Members can list and reveal secrets. Self-signup is disabled; membership is invite-only through Cognito admin APIs. Each secret uses KMS envelope encryption: Lambda calls `GenerateDataKey` with an encryption context, encrypts locally with AES-256-GCM, stores ciphertext plus the encrypted data key in DynamoDB, and calls `Decrypt` only during reveal. The DynamoDB table itself is encrypted with the same customer-managed key. The application writes audit events for `CREATE`, `REVEAL`, `DELETE`, and `INVITE`; KMS key use is separately captured by CloudTrail.
 
@@ -42,7 +42,7 @@ The customer problem is grounded in prior product experience with small-business
 |---:|---|---|---|
 | 1 | `validate-policy` did not route a `Principal: "*"` trust policy to `check-no-public-access`. | AWS has the detection capability, but it lives in a separate command/API; the newcomer path gives a clean result at the exact pre-deploy moment when a warning would help. | In `validate-policy`, either fan out to the specialized public-access check when the resource type is known, or return a next-step hint that names `check-no-public-access` / external-access analysis. |
 | 2 | KMS access is a hidden two-policy contract. | Docs say key policy and identity policy both matter, but the default root statement silently enables IAM delegation; removing it breaks otherwise valid IAM grants. | In the KMS console/CDK output, label the root statement as "enables IAM policy delegation" instead of looking like accidental over-permission. |
-| 3 | API Gateway CORS has three independent surfaces. | Preflight, Lambda responses, and gateway-generated 401/403s each need headers; all failures collapse into browser "Failed to fetch." | Offer one higher-level CORS contract for Cognito-protected APIs, or error messages that name the missing surface. See Appendix C for a design sketch. |
+| 3 | API Gateway CORS has three independent surfaces. | Preflight, Lambda responses, and gateway-generated 401/403s each need headers; all failures collapse into browser "Failed to fetch." | Offer one higher-level CORS contract for Cognito-protected APIs, or error messages that name the missing surface. See Appendix E for a design sketch. |
 | 4 | DynamoDB `LeadingKeys` is structurally hard to use behind Lambda. | The common browser → API Gateway → Lambda pattern has one execution role, so per-user IAM row scoping requires STS session tags and role assumption. | Provide a first-class Lambda + DynamoDB scoped-access pattern in CDK or serverless docs. |
 | 5 | `cdk bootstrap` creates significant IAM surface with little explanation. | New accounts receive 5 roles plus supporting resources before the user understands the trust and pass-role chain. | Print a purpose table before creation and a `cdk bootstrap --show-resources` inspection command after. |
 | 6 | CDK's default `cfn-exec-role` has `AdministratorAccess`. | The actual deploy path is user → deploy role → CloudFormation → admin execution role, but the chain is not taught at the consent moment. | Explain the chain in bootstrap/deploy output and provide a guided least-privilege bootstrap path. |
@@ -115,18 +115,26 @@ Each of these is an example of the right product pattern: AWS encoded a previous
 
 ### A. Links and demo access
 
-- **Live demo**: <https://d27nvg04sp0g9m.cloudfront.net> *(available through 2026-05-25; the stack is torn down within 24 hours of the D8 review to limit ongoing costs. Screenshots in [`docs/screenshots/`](screenshots/) are the post-tear-down fallback.)*
-- **Code**: <https://github.com/cheers-nl/iam>
-- **Full pain log**: [`pain-log.md`](../pain-log.md) *(32 entries across 9 services)*
-- **AI-vs-AA evidence**: [`docs/evidence/`](evidence/) *(6 fixtures + raw `validate-policy`, `check-no-public-access`, and AI advisor outputs; idempotent `reproduce.sh`)*
+- **[Live demo](https://d27nvg04sp0g9m.cloudfront.net)** *(available through 2026-05-25; the stack is torn down within 24 hours of the D8 review to limit ongoing costs. Screenshots in [`docs/screenshots/`](screenshots/) are the post-tear-down fallback.)*
+- **[Code](https://github.com/cheers-nl/iam)**
 - **AI advisor implementation**: [`app/policy-advisor/index.ts`](../app/policy-advisor/index.ts)
 - **CDK stack**: [`infra/lib/team-vault-lite-stack.ts`](../infra/lib/team-vault-lite-stack.ts)
 
-### B. FAQ
+### B. Full pain log
 
-1. **95% of teams should buy 1Password. Why does this customer matter to AWS IAM?**
+32 friction entries spanning 9 services, captured during the 8-day build. Each entry records what I was trying to do, the specific friction encountered, what would have been easier, the affected service(s), category, and severity. The pain log is the raw evidence behind the Top 10 observations in the body of this document — the body distills, the pain log records.
 
-   The 5% that builds inside AWS is exactly the segment that exercises IAM's primitives at depth — KMS double-grant, IdC home-region permanence, IAM-scoped DynamoDB, gateway-level CORS. Every friction point that segment hits is also hitting larger teams building higher-stakes systems on the same primitives. The customer scenario in this report is a representative composite drawn from prior product experience with the same problem class (Appendix E); the friction surface it exposes is the friction any AWS customer building federation, audit, and credential systems in their own account will encounter.
+Read at [`pain-log.md`](../pain-log.md) in the repository root.
+
+### C. AI advisor vs Access Analyzer comparison
+
+A standalone narrative analysis of the 6-fixture experiment with per-fixture findings, where the advisor's semantic reasoning differs categorically from AA's structural validation, and the limits of the comparison. The reading order is: this section names the document; [`docs/ai-vs-aa-comparison.md`](ai-vs-aa-comparison.md) is the analysis; [`docs/evidence/`](evidence/) is the reproducible raw inputs and outputs (6 fixtures + `validate-policy` / `check-no-public-access` / AI advisor outputs + idempotent `reproduce.sh`).
+
+### D. FAQ
+
+1. **Why is a single-team credential vault worth IAM team attention?**
+
+   Single-team credential vaults exercise IAM's primitives at depth — KMS double-grant, IdC home-region permanence, IAM-scoped DynamoDB, gateway-level CORS. Every friction point this segment encounters is also encountered by larger teams building higher-stakes systems on the same primitives. The customer scenario in this report is a representative composite drawn from prior product experience with the same problem class (Appendix G); the friction surface it exposes is the friction any AWS customer building federation, audit, and credential systems in their own account will encounter.
 
 2. **The 6-fixture sample is small. Why should these patterns generalize?**
 
@@ -140,7 +148,7 @@ Each of these is an example of the right product pattern: AWS encoded a previous
 
    Top 10 #5 (`cdk bootstrap` IAM surface) and #8 (IdC home-region permanence) are skewed toward newcomer noise: they hit once, hard, and then never again. Top 10 #1 (`validate-policy` ↔ `check-no-public-access` routing), #2 (KMS double-grant), #3 (API Gateway CORS three surfaces), and #4 (DynamoDB `LeadingKeys` behind Lambda) are systemic: they hit any engineer building a federated, encrypted, scoped, browser-served customer experience on AWS, newcomer or not. The five Product Opportunities are weighted toward the systemic group.
 
-### C. Deep dive — API Gateway CORS as a three-surface contract
+### E. Deep dive — API Gateway CORS as a three-surface contract
 
 *Shaping-level, not specification-level. Three options, one recommendation.*
 
@@ -158,16 +166,16 @@ Each of these is an example of the right product pattern: AWS encoded a previous
 
 **Recommendation.** Ship Option C first because it has the lowest service-side cost, the shortest time-to-customer, and catches the most-common newcomer case (the third surface only fails after token expiry, which is exactly when a newcomer can no longer tell what changed). Pursue Option A as the long-term canonical fix: one contract per feature is the right end-state, and the per-surface configurations can deprecate over a multi-release window. Option B is a useful complement to either, particularly for users who configure CORS in the AWS console and never touch CDK.
 
-### D. First 30/60/90 days
+### F. First 30/60/90 days
 
 *Framed as a thinking exercise. Not commitments — likely candidates.*
 
 1. **First 30 days.** Read the team's most-recent OP1 documents. Shadow or review `validate-policy` customer support cases with the team for two weeks to ground my 8-day build sample in real customer texture. Identify three Top 10 observations that intersect active customer-feedback channels — those become priority candidates.
 
-2. **First 60 days.** Pick one priority candidate and write a 6-pager mapping current state, three design options, and a recommendation. Likely candidates: (a) `validate-policy` ↔ `check-no-public-access` routing, (b) `cdk bootstrap` IAM surface visibility, (c) API Gateway CORS three-surface contract. The CORS deep dive in Appendix C is a starter sketch for (c).
+2. **First 60 days.** Pick one priority candidate and write a 6-pager mapping current state, three design options, and a recommendation. Likely candidates: (a) `validate-policy` ↔ `check-no-public-access` routing, (b) `cdk bootstrap` IAM surface visibility, (c) API Gateway CORS three-surface contract. The CORS deep dive in Appendix E is a starter sketch for (c).
 
 3. **First 90 days.** Have the chosen 6-pager reviewed and either green-lit or returned with a clear next step. Begin a measured-baseline study for whichever direction is chosen — for example, "what percentage of customer policies that pass `validate-policy` fail `check-no-public-access`?" — so that the second 6-pager can land with measured customer impact rather than only the newcomer-build evidence in this one.
 
-### E. Prior-art reference
+### G. Prior-art reference
 
 Team Vault was informed by prior product experience with the same customer problem at a different company. That product addressed credential sharing for small-business teams using a self-managed AES-256-GCM key held in a process environment variable, with ciphertext stored in Postgres and a custom application-level access log. The contrast between that stack and the AWS-native primitives chosen here (KMS-managed envelope encryption, CloudTrail-captured key use, DynamoDB-backed audit, IAM-scoped access via Cognito groups) sharpened several of the friction observations above — particularly Top 10 entry #2 (KMS double grant), #6 (`cfn-exec-role` overprovisioning), and the AI advisor experiment.
