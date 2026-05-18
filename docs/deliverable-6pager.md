@@ -6,7 +6,7 @@
 
 AWS IAM friction for newcomers is rarely about missing capabilities. It is about hidden state, hidden defaults, split responsibility across services, and tool surfaces that do not point users to the adjacent capability they need. I learned this by building Team Vault — a single-tenant internal credential manager — over 8 days, and logging 32 IAM-adjacent friction moments along the way.
 
-The highest-impact finding: IAM Access Analyzer has a specialized `check-no-public-access` API that correctly fails a public-principal trust policy (`Principal: "*"`). The synchronous `validate-policy` path — the one most newcomers reach for — neither catches the case nor points to the adjacent check, even with the trust-policy resource-type hint. A Bedrock-backed advisor I built caught the same case at the `validate-policy` moment, plus three other semantic patterns on the same fixture set, at about $0.06 per review. AWS has the detection capability; the gap is workflow integration and discoverability.
+The highest-impact finding: IAM Access Analyzer has a specialized `check-no-public-access` API that correctly fails a public-principal trust policy (`Principal: "*"`). The synchronous `validate-policy` path — positioned in AWS tooling and docs as the pre-deploy policy check — neither catches the case nor points to the adjacent check, even with the trust-policy resource-type hint. A Bedrock-backed advisor I built caught the same case at the `validate-policy` moment, plus three other semantic patterns on the same fixture set, at about $0.06 per review. AWS has the detection capability; the gap is workflow integration and discoverability.
 
 The build is intentionally a normal customer scenario rather than an identity-only exercise: a React SPA on S3 + CloudFront, Cognito Hosted UI auth with PKCE, API Gateway with a Cognito authorizer, Lambda handlers, DynamoDB storage with audit, KMS envelope encryption, CDK infrastructure, and a Bedrock-backed policy advisor.
 
@@ -25,7 +25,7 @@ The build is intentionally a normal customer scenario rather than an identity-on
 
 **Build path.** Each step below is roughly a day's work for the engineer experiencing it.
 
-1. **Account guardrails.** Enable root MFA, configure a zero-spend budget alarm, enable IAM Identity Center, choose a permanent home region, and stand up admin access through SSO CLI. This is the first day, and it creates more IAM surface than any subsequent step.
+1. **Account guardrails.** Enable root MFA, configure a low-spend budget alarm, enable IAM Identity Center, choose a permanent home region, and stand up admin access through SSO CLI. This is the first day, and it creates more IAM surface than any subsequent step.
 2. **Infrastructure-as-Code.** Install AWS CDK, run `cdk bootstrap` once per region — which silently provisions five IAM roles — and deploy a hello-world Lambda behind API Gateway.
 3. **End-user authentication.** Stand up a Cognito user pool, enable the Hosted UI, attach a Cognito authorizer to API Gateway, and verify that ID tokens (not access tokens) reach Lambda as claims.
 4. **Scoped storage.** Introduce DynamoDB with a single-table design. Read and write secrets scoped first by user identity, later refactored to team identity.
@@ -87,7 +87,13 @@ Both tools flag the dangerous policy. Only the advisor recognizes the metadata-l
 
 ## Product Opportunities
 
-The ten observations cluster into three simplification levers I would prioritize. **Lever 1: make AWS-managed surface visible at the moment AWS creates it.** Bootstrap, KMS defaults, IdC home region, and `cdk deploy` IAM prompts all provision critical IAM surface that the user encounters as opaque CloudFormation or as a yes/no consent prompt. **Lever 2: collapse cross-service contracts into a single surface.** API Gateway CORS, DynamoDB `LeadingKeys` behind Lambda, KMS double-grant, and `validate-policy`-to-`check-no-public-access` routing each require the user to learn that "this feature is configured in three places that look unrelated." **Lever 3: translate machine codes into next-step actions.** Bedrock four-gate access, Cognito wrong-token vs expired-token, and gateway-response CORS on 401 each surface as a generic error that names neither the failing layer nor the next action. The five opportunities below each retire one or more points of Top 10 friction.
+The ten observations cluster into three simplification levers I would prioritize:
+
+1. **Make AWS-managed surface visible at the moment AWS creates it.** Bootstrap, KMS defaults, IdC home region, and `cdk deploy` IAM prompts all provision critical IAM surface that the user encounters as opaque CloudFormation or as a yes/no consent prompt.
+2. **Collapse cross-service contracts into a single surface.** API Gateway CORS, DynamoDB `LeadingKeys` behind Lambda, KMS double-grant, and `validate-policy`-to-`check-no-public-access` routing each require the user to learn that "this feature is configured in three places that look unrelated."
+3. **Translate machine codes into next-step actions.** Bedrock four-gate access, Cognito wrong-token vs expired-token, and gateway-response CORS on 401 each surface as a generic error that names neither the failing layer nor the next action.
+
+The five product opportunities below each retire one or more points of Top 10 friction, indexed against the three levers above.
 
 1. **Surface what AWS creates on the user's behalf.** Bootstrap, KMS defaults, and IdC setup should show newly-created IAM surface with purpose labels. *(Lever 1; retires #5, #6, #8.)*
 2. **Make consent prompts actionable.** `cdk deploy` should distinguish normal service plumbing from broad or privilege-escalating grants, with a plain-language annotation and blast-radius summary before the `y/n`. *(Lever 1; retires #7.)*
@@ -120,7 +126,7 @@ Each of these is an example of the right product pattern: AWS encoded a previous
 
 1. **95% of teams should buy 1Password. Why does this customer matter to AWS IAM?**
 
-   The 5% that builds inside AWS is exactly the segment that exercises IAM's primitives at depth — KMS double-grant, IdC home-region permanence, IAM-scoped DynamoDB, gateway-level CORS. Every friction point that segment hits is also hitting larger teams building higher-stakes systems on the same primitives. The customer in this report is hypothetical; the friction surface it exposes is shared with real AWS customers building federation, audit, and credential systems in their own accounts.
+   The 5% that builds inside AWS is exactly the segment that exercises IAM's primitives at depth — KMS double-grant, IdC home-region permanence, IAM-scoped DynamoDB, gateway-level CORS. Every friction point that segment hits is also hitting larger teams building higher-stakes systems on the same primitives. The customer scenario in this report is a representative composite drawn from prior product experience with the same problem class (Appendix E); the friction surface it exposes is the friction any AWS customer building federation, audit, and credential systems in their own account will encounter.
 
 2. **The 6-fixture sample is small. Why should these patterns generalize?**
 
@@ -156,27 +162,12 @@ Each of these is an example of the right product pattern: AWS encoded a previous
 
 *Framed as a thinking exercise. Not commitments — likely candidates.*
 
-1. **First 30 days.** Read the team's most-recent OP1 documents. Sit on `validate-policy` customer support cases for two weeks to ground my 8-day build sample in real customer texture. Identify three Top 10 observations that intersect active customer-feedback channels — those become priority candidates.
+1. **First 30 days.** Read the team's most-recent OP1 documents. Shadow or review `validate-policy` customer support cases with the team for two weeks to ground my 8-day build sample in real customer texture. Identify three Top 10 observations that intersect active customer-feedback channels — those become priority candidates.
 
 2. **First 60 days.** Pick one priority candidate and write a 6-pager mapping current state, three design options, and a recommendation. Likely candidates: (a) `validate-policy` ↔ `check-no-public-access` routing, (b) `cdk bootstrap` IAM surface visibility, (c) API Gateway CORS three-surface contract. The CORS deep dive in Appendix C is a starter sketch for (c).
 
 3. **First 90 days.** Have the chosen 6-pager reviewed and either green-lit or returned with a clear next step. Begin a measured-baseline study for whichever direction is chosen — for example, "what percentage of customer policies that pass `validate-policy` fail `check-no-public-access`?" — so that the second 6-pager can land with measured customer impact rather than only the newcomer-build evidence in this one.
 
-### E. Cost summary
-
-> ⚠️ **DRAFT — INSERT BEFORE SUBMISSION.** Replace this entire section with the output of the query below, or delete this section if the number is not yet available. Do not submit with placeholder.
-
-The project was sized against a low-spend budget alarm at $10. Expected services with non-zero spend: Bedrock (across 6 fixture reviews and dev iterations), KMS (key creation, annual rotation amortized, per-call charges), CloudFront, DynamoDB, Lambda, API Gateway, and data transfer.
-
-```
-aws ce get-cost-and-usage \
-  --time-period Start=2026-05-10,End=2026-05-18 \
-  --granularity DAILY \
-  --metrics UnblendedCost \
-  --group-by Type=DIMENSION,Key=SERVICE \
-  --profile personal-admin
-```
-
-### F. Prior-art reference
+### E. Prior-art reference
 
 Team Vault was informed by prior product experience with the same customer problem at a different company. That product addressed credential sharing for small-business teams using a self-managed AES-256-GCM key held in a process environment variable, with ciphertext stored in Postgres and a custom application-level access log. The contrast between that stack and the AWS-native primitives chosen here (KMS-managed envelope encryption, CloudTrail-captured key use, DynamoDB-backed audit, IAM-scoped access via Cognito groups) sharpened several of the friction observations above — particularly Top 10 entry #2 (KMS double grant), #6 (`cfn-exec-role` overprovisioning), and the AI advisor experiment.
