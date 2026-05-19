@@ -1,8 +1,8 @@
-# AWS-native Team Vault Build Report
+# AWS IAM: Day 1 Build Report — Team Vault
 
 ## Executive summary
 
-Building Team Vault surfaced a consistent IAM pattern: the hardest friction was not missing AWS capability, but discovering which IAM-adjacent capability applied at the moment of need. The clearest example is IAM Access Analyzer — `check-no-public-access` correctly fails a public-principal trust policy (`Principal: "*"`), but `validate-policy` (the path positioned in AWS tooling and docs as the pre-deploy policy check) neither catches the case nor routes the user to the adjacent check. A Bedrock-backed advisor I prototyped caught the same case at the `validate-policy` moment, supporting workflow integration as the product gap. The 8-day build produced 32 IAM-adjacent friction observations and four product opportunities: surface AWS-created IAM surface at the moment of creation, collapse cross-service contracts into one guided pattern, translate machine errors into next-step actions, and route customers across the Access Analyzer tool surface.
+Building Team Vault surfaced a consistent IAM pattern: the hardest friction was not missing AWS capability, but discovering which IAM-adjacent capability applied at the moment of need. The clearest example is IAM Access Analyzer — `check-no-public-access` correctly fails a public-principal trust policy (`Principal: "*"`), but `validate-policy` (the path positioned in AWS tooling and docs as the pre-deploy policy check) neither catches the case nor routes the user to the adjacent check. A Bedrock-backed advisor I prototyped caught the same case at the `validate-policy` moment, which points to workflow integration as the product gap. The 8-day build produced 32 IAM-adjacent friction observations and four product opportunities: surface AWS-created IAM surface at the moment of creation, collapse cross-service contracts into one guided pattern, translate machine errors into next-step actions, and route customers across the Access Analyzer tool surface.
 
 ## Who is the customer?
 
@@ -17,6 +17,8 @@ This scenario is grounded in prior product experience with the same problem clas
 ## What is built?
 
 Team Vault is a single-tenant AWS-hosted credential manager for teams that need shared secrets, role-based access, encryption, and audit inside their own AWS account. Admins can create, reveal, delete, audit, and invite members. Members can list and reveal secrets. Self-signup is disabled; membership is invite-only through Cognito admin APIs. Each secret uses KMS envelope encryption: Lambda calls `GenerateDataKey` with an encryption context, encrypts locally with AES-256-GCM, stores ciphertext plus the encrypted data key in DynamoDB, and calls `Decrypt` only during reveal. The DynamoDB table itself is encrypted with the same customer-managed key. The application writes audit events for `CREATE`, `REVEAL`, `DELETE`, and `INVITE`; KMS key use is separately captured by CloudTrail.
+
+Architecture: Cognito Hosted UI → CloudFront/S3 SPA → API Gateway with Cognito authorizer → Lambda → DynamoDB + KMS.
 
 ## How is Team Vault built?
 
@@ -33,7 +35,7 @@ Team Vault is a single-tenant AWS-hosted credential manager for teams that need 
 
 | # | Friction point | Why it matters | Product suggestion |
 |---:|---|---|---|
-| 1 | `validate-policy` did not route a `Principal: "*"` trust policy to `check-no-public-access`. AWS has the detection capability, but it lives in a separate command. | The pre-deploy validation path returns no findings on a high-impact misconfiguration. The customer must already know `check-no-public-access` exists to find it. Risky policies move downstream to review, support, or production. | Have `validate-policy` fan out to the specialized public-access check when resource type is known, or return a next-step hint naming `check-no-public-access` and external-access analysis. As a complement: a productized `--deep-review` mode (LLM-backed, ~$0.01–$0.06 per review). My Bedrock prototype caught this case at the `validate-policy` moment plus three other semantic patterns, and on a prompt-injection test `Sid` recognized the injection attempt as an indicator of compromise rather than complying with it. |
+| 1 | `validate-policy` did not route a `Principal: "*"` trust policy to `check-no-public-access`. AWS has the detection capability, but it lives in a separate command. | The pre-deploy validation path returns no findings on a high-impact misconfiguration. The customer must already know `check-no-public-access` exists to find it. Risky policies move downstream to review, support, or production. | Have `validate-policy` fan out to the specialized public-access check when resource type is known, or return a next-step hint naming `check-no-public-access` and external-access analysis. |
 | 2 | KMS access depends on both key policy and identity policy, but the default root statement silently enables IAM delegation. | Teams adopting encryption misdiagnose access failures, over-grant to get unstuck, or avoid customer-managed keys. The "double grant" contract is real but the default makes it invisible. | Label the root statement as "enables IAM policy delegation" in console, CDK output, and error messages. Add a preflight check that names which side of the contract is missing. |
 | 3 | API Gateway CORS has three independent configuration surfaces: preflight, Lambda response, and gateway responses for 401/403. | All three failures collapse into the same browser `Failed to fetch` error, so engineers debug frontend, auth, and API layers without knowing which one failed. The third surface only fails after token expiry, often hours later. | Provide one API-level `corsContract` property for Cognito-protected APIs that applies to all three surfaces. As a minimum, a CDK synth warning when preflight is configured but gateway responses are not. |
 | 4 | DynamoDB `LeadingKeys` promises per-row IAM enforcement, but the Lambda execution-role pattern collapses all users to one principal. | Per-user IAM row scoping requires `sts:AssumeRole` with session tags, which most teams skip. The result: app-only authorization even when IAM has a marquee condition-key primitive for exactly this case. | Publish a first-class CDK construct (e.g., `ScopedDynamoTable`) for Lambda plus DynamoDB scoped access, with session-tag propagation, sample policies, and failure-mode tests. Alternative: extend API Gateway's Cognito authorizer to pass `cognito:sub` as a session tag automatically. |
@@ -44,6 +46,8 @@ Team Vault is a single-tenant AWS-hosted credential manager for teams that need 
 | 9 | Cognito group changes require token refresh — the newly-assigned `cognito:groups` claim is invisible until re-authentication. | API Gateway authorizer caching can extend the gap further. Admins debug confusing 403s as IAM or API defects when the cause is token staleness. | State the re-authentication requirement in Cognito console and `AdminAddUserToGroup` docs. In API Gateway, warn when authorizer caching may delay permission changes after a group change. |
 | 10 | API Gateway's Cognito authorizer accepts ID tokens but rejects access tokens — opposite of OAuth 2.0 convention. | Wrong-token, expired-token, and malformed-token failures all return generic 401s, so customers debug the wrong layer. This is a common newcomer gotcha that contradicts OAuth intuition. | Differentiate wrong token type, expired token, and malformed token in authorizer responses. Include a one-line link to the expected token type for API Gateway. |
 
+*Supporting evidence for #1: a Bedrock-backed advisor prototype caught this case at the `validate-policy` moment, which suggests the gap is workflow integration rather than missing detection capability.*
+
 ## Product opportunities
 
 The pattern across these observations is not that IAM lacks primitives. The primitives usually exist. The opportunity is to make the right primitive visible at the moment the customer needs it.
@@ -53,9 +57,9 @@ The pattern across these observations is not that IAM lacks primitives. The prim
 3. **Turn machine errors into next-step actions.** Wrong token type, stale Cognito group claims, missing CORS on gateway responses, and KMS policy-side failures should name the failing layer and the next action. This converts generic access failures into self-service recovery.
 4. **Route customers across the Access Analyzer tool surface.** `validate-policy`, `check-no-public-access`, and unused-access analysis answer different questions. The product should guide customers from one surface to the adjacent one instead of requiring them to already know the map.
 
-## Pain points logged during the build
+## Evidence: 29 IAM friction observations logged during the build
 
-The Top 10 above are distilled from 32 logged friction moments captured during the 8-day build. The full source remains in [`pain-log.md`](../pain-log.md); the list below keeps the evidence visible without making Kai leave the document.
+The Top 10 above are distilled from these 29 IAM friction observations captured during the 8-day build. Tags `(→ Top 10 #X)` mark entries that distill directly into the Top 10 table; the full source pain log is at [`pain-log.md`](../pain-log.md).
 
 1. Root MFA banner said "required in 33 days" without explaining what enforcement meant.
 2. IAM and IAM Identity Center appeared side by side with names that did not explain the difference.
@@ -64,31 +68,28 @@ The Top 10 above are distilled from 32 logged friction moments captured during t
 5. The SSO browser flow landed on the access portal instead of completing the CLI device authorization.
 6. The SSO browser flow did not explain that it needed Identity Center credentials, not root credentials.
 7. Identity Center setup did not signal that CLI configuration was a separate next step.
-8. `cdk bootstrap` created five IAM roles and supporting resources without a consent summary.
+8. `cdk bootstrap` created five IAM roles and supporting resources without a consent summary. *(→ Top 10 #5)*
 9. The Bedrock-backed advisor I prototyped flagged a prompt-injection `Sid` as an indicator of compromise; `validate-policy` treated the same value as inert text.
-10. Cognito group changes required re-authentication before new claims appeared.
+10. Cognito group changes required re-authentication before new claims appeared. *(→ Top 10 #9)*
 11. The `cognito:groups` claim appeared as different shapes across paths, forcing defensive parsing in authorization code.
 12. `AdminCreateUser` plus `AdminAddUserToGroup` created a non-atomic invitation flow with orphan-user risk.
-13. Bedrock access had a sales-tier gate discoverable only by trial and error on newer top-tier models.
-14. The Bedrock Model Access page had changed, but the Anthropic use-case form gate still existed.
-15. Bedrock model access had multiple gates that produced different cryptic access errors.
-16. `validate-policy` missed overprovisioning that unused-access analysis later flagged.
-17. `validate-policy` gave misleading trust-policy errors unless the resource-type hint was known.
-18. `validate-policy` did not route public-principal trust policies to `check-no-public-access`.
-19. Unused Access Analyzer was fast and useful, and independently validated CDK bootstrap overprovisioning.
-20. CDK half-abstracted CORS: preflight lived in stack config while response headers lived in Lambda code.
-21. API Gateway CORS had three independent surfaces, including gateway responses for generated 401/403s.
-22. KMS access required key-policy and identity-policy alignment, but the default delegation rule hid the relationship.
-23. KMS access-denied errors named the failing side but did not hint at the other side of the contract.
-24. CDK's `grantEncryptDecrypt` added more KMS actions than the Lambda used.
-25. `aws kms get-key-policy` rejected key aliases, unlike other KMS commands that accept aliases.
-26. CDK's `grantReadWriteData()` expanded to twelve DynamoDB actions for an app that needed three.
-27. DynamoDB `LeadingKeys` promised row-level IAM enforcement but was hard to wire through Lambda backends.
-28. API Gateway's Cognito authorizer accepted ID tokens but rejected access tokens.
-29. `cdk deploy` IAM statement changes asked for consent a newcomer could not meaningfully evaluate.
-30. CDK's `cfn-exec-role` carried `AdministratorAccess` by default.
-31. Fresh `cdk init` emitted deprecated dependency and Node warnings.
-32. Identity Center home region was permanent, but the setup flow did not make that clear.
+13. `validate-policy` missed overprovisioning that unused-access analysis later flagged.
+14. `validate-policy` gave misleading trust-policy errors unless the resource-type hint was known.
+15. `validate-policy` did not route public-principal trust policies to `check-no-public-access`. *(→ Top 10 #1)*
+16. Unused Access Analyzer was fast and useful, and independently validated CDK bootstrap overprovisioning.
+17. CDK half-abstracted CORS: preflight lived in stack config while response headers lived in Lambda code.
+18. API Gateway CORS had three independent surfaces, including gateway responses for generated 401/403s. *(→ Top 10 #3)*
+19. KMS access required key-policy and identity-policy alignment, but the default delegation rule hid the relationship. *(→ Top 10 #2)*
+20. KMS access-denied errors named the failing side but did not hint at the other side of the contract.
+21. CDK's `grantEncryptDecrypt` added more KMS actions than the Lambda used.
+22. `aws kms get-key-policy` rejected key aliases, unlike other KMS commands that accept aliases.
+23. CDK's `grantReadWriteData()` expanded to twelve DynamoDB actions for an app that needed three.
+24. DynamoDB `LeadingKeys` promised row-level IAM enforcement but was hard to wire through Lambda backends. *(→ Top 10 #4)*
+25. API Gateway's Cognito authorizer accepted ID tokens but rejected access tokens. *(→ Top 10 #10)*
+26. `cdk deploy` IAM statement changes asked for consent a newcomer could not meaningfully evaluate. *(→ Top 10 #7)*
+27. CDK's `cfn-exec-role` carried `AdministratorAccess` by default. *(→ Top 10 #6)*
+28. Fresh `cdk init` emitted deprecated dependency and Node warnings.
+29. Identity Center home region was permanent, but the setup flow did not make that clear. *(→ Top 10 #8)*
 
 ---
 
