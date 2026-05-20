@@ -2,7 +2,7 @@
 
 ## Executive summary
 
-Building Team Vault surfaced a consistent IAM pattern: the hardest friction was not missing AWS capability, but discovering which IAM-adjacent capability applied at the moment of need. The clearest example is IAM Access Analyzer — `check-no-public-access` correctly fails a public-principal trust policy (`Principal: "*"`), but `validate-policy` (the path positioned in AWS tooling and docs as the pre-deploy policy check) neither catches the case nor routes the user to the adjacent check. A Bedrock-backed advisor I prototyped caught the same case at the `validate-policy` moment, which points to workflow integration as the product gap. The 8-day build produced 32 IAM-adjacent friction observations and four product opportunities: surface AWS-created IAM surface at the moment of creation, collapse cross-service contracts into one guided pattern, translate machine errors into next-step actions, and route customers across the Access Analyzer tool surface.
+Building Team Vault surfaced a consistent IAM pattern: the hardest friction was not missing AWS capability, but discovering which IAM-adjacent capability applied at the moment of need. The clearest example is IAM Access Analyzer — `check-no-public-access` correctly fails a public-principal trust policy (`Principal: "*"`), but `validate-policy` (the path positioned in AWS tooling and docs as the pre-deploy policy check) neither catches the case nor routes the user to the adjacent check. A Bedrock-backed advisor I prototyped caught the same case at the `validate-policy` moment, which points to workflow integration as the product gap. The 8-day build produced 29 IAM-adjacent friction observations and four product opportunities: surface AWS-created IAM surface at the moment of creation, collapse cross-service contracts into one guided pattern, translate machine errors into next-step actions, and route customers across the Access Analyzer tool surface.
 
 ## Who is the customer?
 
@@ -101,17 +101,3 @@ The Top 10 above are distilled from these 29 IAM friction observations captured 
 - **[Code](https://github.com/cheers-nl/iam)**
 - **CDK stack**: [`infra/lib/team-vault-lite-stack.ts`](../infra/lib/team-vault-lite-stack.ts)
 - **Full pain log source**: [`pain-log.md`](../pain-log.md)
-
-### B. FAQ
-
-1. **Why is a single-team credential vault worth IAM team attention?**
-
-   Single-team credential vaults exercise IAM's primitives at depth: KMS double-grant, Identity Center home-region permanence, Cognito group claims, IAM-scoped DynamoDB, CDK bootstrap roles, and API Gateway authorization. Larger teams building higher-stakes systems encounter the same service boundaries. The customer scenario is a representative composite drawn from prior product experience with the same problem class.
-
-2. **Which observations are newcomer-only, and which are systemic product opportunities?**
-
-   `cdk bootstrap` role creation and Identity Center home-region permanence are strongest on the first build, though they still affect account setup quality. KMS double-grant, API Gateway CORS, DynamoDB `LeadingKeys` behind Lambda, Cognito token semantics, and Access Analyzer routing are systemic because they recur in production architectures, not just onboarding.
-
-3. **What would I validate next with the team?**
-
-   I would compare these 32 build observations against customer feedback channels, support cases, and Access Analyzer usage data. The highest-value measurement would be: how often does a customer policy pass `validate-policy` but fail an adjacent specialized analysis such as `check-no-public-access` or unused-access analysis?

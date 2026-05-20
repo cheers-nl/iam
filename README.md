@@ -1,43 +1,39 @@
-# Team Vault
+# AWS IAM — pre-employment learning journey
 
-A small AWS-native team password vault — a learning project exploring KMS envelope encryption, Cognito-based authentication, role-based authorization, and IAM patterns for credential management in a shared team context.
+Work I've done while preparing to join the AWS IAM team as PMT-ES. Two hands-on learning exercises, each surfacing IAM friction observations from real customer-shaped scenarios.
 
-## Status
+## Exercises
 
-In development as the build artifact for a Day 1 onboarding deliverable. See [docs/deliverable-6pager.md](docs/deliverable-6pager.md) for the full report, [docs/plan.md](docs/plan.md) for the implementation roadmap, and [pain-log.md](pain-log.md) for the IAM friction observations captured during the build.
+### `team-vault/` — Day 1 Build Report (complete)
 
-## What it is
+An 8-day rebuild of a real team-credential-sharing problem on AWS-native primitives. Surfaced 29 IAM friction observations and 4 product opportunities, distilled into a Top 10 friction table with product suggestions.
 
-A single-tenant shared team vault. Admins (`vault-admin` Cognito group) create, delete, and reveal secrets, view the activity log, and invite teammates. Members (`vault-member` group) can list and reveal secrets but cannot create, delete, or invite. Self-signup is disabled; membership is invite-only via `AdminCreateUser` + `AdminAddUserToGroup`. The SPA uses Cognito Hosted UI authorization-code flow with PKCE. Every secret is encrypted at rest with envelope encryption (KMS-issued data key, AES-256-GCM in Lambda, encrypted data key stored alongside ciphertext in DynamoDB), and the DynamoDB table itself is encrypted with the same customer-managed KMS key. Every `CREATE` / `REVEAL` / `DELETE` / `INVITE` is logged to DynamoDB; underneath, every KMS call is also captured automatically by CloudTrail.
+Built on Cognito (Hosted UI + PKCE), CloudFront/S3 SPA, API Gateway with Cognito authorizer, Lambda, DynamoDB, KMS envelope encryption, CloudTrail audit, and IAM Access Analyzer.
 
-## Stack
+- Deliverable: [`team-vault/docs/Team Vault Build Report.docx`](team-vault/docs/Team%20Vault%20Build%20Report.docx)
+- Markdown source: [`team-vault/docs/deliverable-6pager.md`](team-vault/docs/deliverable-6pager.md)
+- Pain log: [`team-vault/pain-log.md`](team-vault/pain-log.md)
+- Live demo: https://d27nvg04sp0g9m.cloudfront.net (available through 2026-05-25)
+- Repository overview: [`team-vault/README.md`](team-vault/README.md)
 
-- **Infrastructure:** AWS CDK (TypeScript)
-- **Compute:** AWS Lambda + Amazon API Gateway (REST with Cognito User Pool authorizer)
-- **Auth:** Amazon Cognito user pool + Hosted UI with PKCE; role gating via `cognito:groups`
-- **Storage:** Amazon DynamoDB (single-table design, customer-managed KMS encryption)
-- **Encryption:** AWS KMS customer-managed key (envelope encryption)
-- **Frontend:** React + Vite, hosted on Amazon S3 + Amazon CloudFront (Origin Access Control)
-- **Policy review experiment:** Bedrock-backed Lambda (Claude Opus 4.6 via `us.anthropic.claude-opus-4-6-v1` inference profile)
-- **Deploys:** `cdk deploy` from local AWS SSO credentials for infrastructure; `aws s3 sync` + `aws cloudfront create-invalidation` for the SPA bundle. No CI/CD workflow is configured yet.
+### `federation/` — Identity federation exercise (planned)
+
+Setting up identity federation from Okta or Microsoft Entra ID to AWS, with the goal of understanding what enterprise customers experience configuring SSO into the AWS console. Scope pending confirmation from Kai.
+
+Status: not started.
 
 ## Repository layout
 
 ```
-infra/        CDK app (single stack: TeamVaultLite)
-app/          Lambda handler sources
-  secrets-handler/   The vault API (Lambda Function)
-  policy-advisor/    The AI policy advisor experiment (Lambda Function)
-frontend/     Vite + React SPA
-docs/         Deliverable, planning, evidence appendix
-scripts/      Demo smoke test, audit trail helper, demo-data seeder
-pain-log.md   Friction observations captured during the build (32 entries)
+iam/
+├── README.md              this file
+├── team-vault/            Day 1 Build Report (Team Vault)
+│   ├── app/               Lambda handler sources
+│   ├── frontend/          Vite + React SPA
+│   ├── infra/             AWS CDK stack (TypeScript)
+│   ├── scripts/           Demo smoke test, audit trail helper, demo-data seeder
+│   ├── docs/              Deliverable, evidence, screenshots, prep notes
+│   ├── pain-log.md        32 friction observations captured during the build
+│   └── README.md          Team Vault repo overview
+└── federation/            (will be added when scope is confirmed)
 ```
-
-## Documents
-
-- [docs/deliverable-6pager.md](docs/deliverable-6pager.md) — Day 1 report (the deliverable)
-- [docs/plan.md](docs/plan.md) — Implementation plan + decisions log
-- [docs/ai-vs-aa-comparison.md](docs/ai-vs-aa-comparison.md) — AI advisor vs IAM Access Analyzer findings
-- [docs/evidence/](docs/evidence/) — Test policy fixtures + raw outputs from both tools
-- [pain-log.md](pain-log.md) — IAM friction encountered during the build
